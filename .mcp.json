@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/.mcp.schema.json",
+  "mcpServers": {
+    "effect-mcp": {
+      "command": "npx",
+      "args": ["-y", "@effect/mcp"]
+    },
+    "nuxt-mcp": {
+      "command": "npx",
+      "args": ["-y", "nuxt-mcp@latest"]
+    },
+    "nuxt-ui-mcp": {
+      "command": "npx",
+      "args": ["-y", "@nuxt/ui-mcp@latest"]
+    },
+    "playwright-mcp": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"],
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
+    }
+  }
+}
