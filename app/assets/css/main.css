@@ -1,0 +1,24 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* Custom styles for Kanbai */
+.kanban-column {
+  min-height: calc(100vh - 12rem);
+}
+
+.feature-card {
+  cursor: grab;
+}
+
+.feature-card:active {
+  cursor: grabbing;
+}
+
+/* Drag and drop styles */
+.sortable-ghost {
+  opacity: 0.4;
+}
+
+.sortable-chosen {
+  opacity: 0.8;
+}
