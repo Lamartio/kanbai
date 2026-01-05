@@ -1,0 +1,45 @@
+# mise-en-place configuration for Kanbai
+# https://mise.jdx.dev/
+
+[tools]
+# Bun runtime - primary JavaScript/TypeScript runtime
+bun = "latest"
+
+# Node.js - required for some tooling compatibility (Nuxt, etc.)
+node = "22"
+
+[env]
+# Default environment variables
+# CONTEXT7_API_KEY should be set in your shell profile or .env.local
+
+[tasks.dev]
+description = "Start development server"
+run = "bun run dev"
+
+[tasks.build]
+description = "Build for production"
+run = "bun run build"
+
+[tasks.preview]
+description = "Preview production build"
+run = "bun run preview"
+
+[tasks.test]
+description = "Run tests"
+run = "bun run test"
+
+[tasks.lint]
+description = "Run linting"
+run = "bun run lint"
+
+[tasks.typecheck]
+description = "Run TypeScript type checking"
+run = "bun run typecheck"
+
+[tasks.playwright-install]
+description = "Install Playwright browsers"
+run = "bunx playwright install chromium"
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "rm -rf .nuxt .output node_modules/.cache"
