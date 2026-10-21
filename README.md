@@ -3,186 +3,58 @@
 A kanban board and docs kept as markdown in your GitHub repo, maintained by Claude.
 
 - **Online** (claude.ai, iPad, phone): a remote MCP server on Cloudflare that reads and commits to the repo for you.
-- **Local** (Claude Code, parallel agents): a plugin with a CLI that edits the working copy, and gets issue numbers from the same server.
+- **Local** (Claude Code, parallel agents): a plugin with a CLI that edits the working copy, with issue numbers from the same server.
+- **Publishing without a build server:** `/publish` builds and deploys a tagged version on whichever machine you're on, and git makes sure only one machine does.
 
-Issue numbers are atomic: one Durable Object per repo hands them out, so two chats or two agents never get the same one.
+Issue numbers are atomic: one number dispenser per repo hands them out, so two chats or two agents never get the same one.
 
-## How a board looks in a repo
+## Guides
+
+- **[Setup](./docs/setup.md):** deploy the server, connect Claude and Claude Code (also in devcontainers), add kanbai to a repo, set up publishing, troubleshooting.
+- **[Usage](./docs/usage.md):** filing and refining issues, sub-issues, boards and lanes, searching, the doctor, releasing and publishing, plus a full reference of tools, CLI commands, `.board.json` and the issue format.
+
+## At a glance
 
 ```
-.board.json
+.board.json                          settings: folders, lanes, publishing
 docs/board/
-├── 000_board.md                     main board (generated)
+├── 000_board.md                     main board (generated, readable on GitHub)
 ├── 001_build-login.md               issue 001
-├── 001_build-login/002_api.md       sub-issue 002 (same board, not listed on the board file)
+├── 001_build-login/002_api.md       sub-issue 002
 ├── ANT-TEST_000_board.md            board ANT-TEST (generated)
 ├── ANT-TEST_001_create-home.md      issue ANT-TEST_001
 └── ANT-TEST/002_about.md            also board ANT-TEST: folders and prefixes merge
 ```
 
-- Board names are kebab-case and case-sensitive. Numbers count per board.
-- Issues have frontmatter (`title`, `type`, `status`, `assignee`, `created`, `tags`, `links`, `attachments`, `released`) and sections: *Why*, *Done when*, *Context*, *Constraints / not doing*, *Decisions*, *Open questions*, *Log*.
-- Default lanes: `TODO → DOING → DONE → ARCHIVED`. Leaving the first lane needs *Done when*; moving back needs a reason. Deleting is archiving.
-- `.board.json` sets the folders and lanes:
+- Lanes: **TODO → DOING → DONE → ARCHIVED** by default, configurable per repo.
+- Leaving the first lane needs *Done when*; moving back needs a reason; deleting is archiving.
+- Each issue has a *Why*, *Done when*, *Context*, *Constraints / not doing*, *Decisions*, *Open questions* and *Log*.
 
-```json
-{ "docs": "docs", "board": "docs/board", "lanes": ["TODO", "DOING", "DONE", "ARCHIVED"], "attachments": "lfs", "archive": "ARCHIVED" }
-```
+In a chat with the connector on:
 
-### Lanes per repo
+> *"Use kanbai with owner/name as default, set up the board, and file an issue: dark mode toggle, because people use the app at night."*
 
-Each repo has its own lanes in `.board.json`, and every board in that repo uses them. Change them from chat with `set_lanes`, or locally with `kanbai lanes`:
-
-```sh
-node plugin/bin/kanbai.mjs lanes BACKLOG DOING REVIEW DONE --rename TODO=BACKLOG
-```
-
-- The archive lane is always last, and added when you leave it out (`ARCHIVED`, or `archived` when all lanes are lowercase).
-- Issues in a lane that is renamed follow `--rename`; issues in a dropped lane go to the first lane. Each gets a Log line.
-- Editing `.board.json` by hand works too: the doctor then moves issues in unknown lanes to the first lane.
-- An issue in a lane named `DOING` (any case) gets you as assignee when you move it there unassigned.
-
-## Packages
+## Developing kanbai
 
 | Package | What |
 | --- | --- |
-| `packages/core` | All board rules: naming, numbering, moves, board files, search, context pack, doctor. Unit tests. |
-| `packages/mcp-server` | The Cloudflare Worker: GitHub login (OAuth 2.1 for Claude), tools, number dispenser, per-commit read cache. Tests against a fake GitHub. |
-| `packages/cli` | The local CLI, built into `plugin/bin/kanbai.mjs`. |
-| `plugin/` | The Claude Code plugin: the CLI, a skill for the local flow, and the MCP connection. |
+| `packages/core` | All rules: naming, numbering, moves, board files, search, context pack, doctor, publish states. |
+| `packages/mcp-server` | The Cloudflare Worker: GitHub sign-in (OAuth 2.1 for Claude), tools, number dispenser, per-commit read cache. |
+| `packages/cli` | The local CLI, built into `plugin/bin/kanbai.mjs`, including `publish`. |
+| `plugin/` | The Claude Code plugin: CLI, skill, `/publish`, and the MCP connection. |
 
 ```sh
 bun install
-bun run test        # every package
+bun run test          # every package
 bun run typecheck
+bun run --filter @kanbai/cli build   # after changing core or cli: rebuilds plugin/bin/kanbai.mjs
 ```
 
-## Deploy the MCP server
-
-You need a Cloudflare account and a GitHub account. Everything below runs from `packages/mcp-server`.
-
-1. **Create a GitHub OAuth app** at [github.com/settings/developers](https://github.com/settings/developers) → *OAuth Apps* → *New OAuth App*:
-   - Homepage URL: `https://kanbai.<your-subdomain>.workers.dev`
-   - Authorization callback URL: `https://kanbai.<your-subdomain>.workers.dev/callback`
-
-   Keep the client ID, and generate a client secret.
-
-2. **Create the two KV namespaces** and paste their ids into `wrangler.jsonc`:
-
-   ```sh
-   npx wrangler login
-   npx wrangler kv namespace create OAUTH_KV
-   npx wrangler kv namespace create BOARD_KV
-   ```
-
-3. **Check `PUBLIC_URL`** in `wrangler.jsonc`. It must be the Worker's real URL (your workers.dev subdomain shows in the Cloudflare dashboard under *Workers & Pages*).
-
-4. **Add the GitHub secrets and deploy:**
-
-   ```sh
-   npx wrangler secret put GITHUB_CLIENT_ID
-   npx wrangler secret put GITHUB_CLIENT_SECRET
-   npx wrangler deploy
-   ```
-
-5. **Connect Claude:** *Settings → Connectors → Add custom connector*, URL `https://kanbai.<your-subdomain>.workers.dev/mcp`. Claude registers itself; you approve, then sign in with GitHub.
-
-6. **Try it** in a chat: "Use kanbai with repo owner/name as default, set up the board, and file an issue for …".
-
-The GitHub login asks for the `repo` scope, so the server can reach every repo your account can. Moving to a GitHub App (pick repos at install) is planned.
-
-### Run it locally
+The server's tests run against a fake GitHub; the CLI's publish tests run against real local git repos. To run the server locally:
 
 ```sh
-cp .dev.vars.example .dev.vars      # fill in a GitHub OAuth app with callback http://localhost:8787/callback
+cd packages/mcp-server
+cp .dev.vars.example .dev.vars     # a GitHub OAuth app with callback http://localhost:8787/callback
 echo 'PUBLIC_URL=http://localhost:8787' >> .dev.vars
 npx wrangler dev
 ```
-
-## Tools
-
-| Tool | What it does |
-| --- | --- |
-| `list_repos`, `set_default_repo` | Pick the repo the other tools use. |
-| `init_board` | Writes `.board.json` and the board files. |
-| `set_lanes` | Changes the repo's lanes and moves issues along. |
-| `get_board` | A board with its lanes, and the other boards. |
-| `create_issue`, `create_issues` | File one issue, or a batch (e.g. a feature with sub-issues) in one commit. |
-| `reserve_numbers` | Numbers without files, for the local flow. |
-| `read_issue`, `update_issue`, `add_comment` | Read and refine. The Log is append-only. |
-| `move_issue`, `archive_issue` | Lane changes with their rules. |
-| `search_issues`, `search_docs` | Find issues by filters, or anything in the docs. |
-| `context_pack` | Everything needed to start on an issue, in one call. |
-| `doctor` | Finds and fixes problems after hand edits: duplicates, unknown lanes, stale board files, a lagging number counter. |
-| `tag_release` | Creates the next version tag (major, minor, patch) after a preview. |
-| `publish_status` | Read-only view of the publish pipeline per tag (see below). |
-
-Every write is one commit on the default branch. If someone pushed in between, the server reads again and retries.
-
-## Publishing from any client, without a build server
-
-Build and deploy on your own machine or in a Claude Code container. Git decides who builds a tag, so two clients never deploy the same release.
-
-```json
-{
-  "publish": {
-    "command": "./scripts/deploy.sh",
-    "env": {
-      "NODE_ENV": "production",
-      "CLOUDFLARE_ACCOUNT_ID": "a1b2c3",
-      "CLOUDFLARE_API_TOKEN": "${CLOUDFLARE_API_TOKEN}"
-    },
-    "tags": "v*",
-    "leaseMinutes": 30,
-    "branch": "kanbai/publish"
-  }
-}
-```
-
-| Setting | Meaning | Default |
-| --- | --- | --- |
-| `command` | Shell command that builds and deploys, run in a clean checkout of the tag. A script in the repo (`./scripts/deploy.sh`) or a package script (`npm ci && npm run deploy`). Gets `KANBAI_TAG` and `KANBAI_COMMIT`. | required |
-| `env` | Variables for the command. Plain values are passed as they are. `${NAME}` takes NAME from the client: its environment, or `envFile`. Missing ones stop publish before anything is claimed, so a client without the token refuses instead of failing halfway. Never put secret values here: this file is committed. | none |
-| `envFile` | A file on the client with `KEY=value` lines, for secrets like deploy tokens. Keep it out of git: kanbai refuses to use it when git tracks it. The real environment wins over the file. | `.env.publish` |
-| `tags` | Which tags count as versions. | `v*` |
-| `leaseMinutes` | How long a claim lasts without renewal before another client may take over. | 30 |
-| `branch` | Branch that holds the publish events. | `kanbai/publish` |
-
-Which tag gets built:
-
-- `publish` with no version builds the **newest** tag, but only while nobody has claimed or published it. When the newest tag is being built, it refuses; when it is already published, it asks for a version. A failed newest tag needs `--retry`.
-- `publish <tag>` builds that version in any state: a redeploy, a rollback to an older tag, or a retry. Only a tag someone is building right now is refused.
-
-```sh
-node plugin/bin/kanbai.mjs publish          # or /publish in Claude Code
-node plugin/bin/kanbai.mjs publish --list   # pending, building, done, failed per tag
-```
-
-Create the tag with `git tag v1.4.0 && git push --tags` on your computer, or from chat with the MCP's `tag_release` (bump major, minor or patch). Claude Code's cloud containers can't push tags, so from the iPad use `tag_release`.
-
-How it works:
-
-1. Everything is recorded on one branch, `kanbai/publish`. Each commit on it is one event (a claim, a renewal, done, failed, a manual release), with an empty tree and a JSON message. `git log kanbai/publish` is the deploy history.
-2. Every write is a normal **fast-forward push** of one new commit. When two clients write at the same moment, the remote accepts one and rejects the other: that is the lock. Nothing is force-pushed or deleted, so it also works through restrictive git proxies such as Claude Code's cloud containers.
-3. `publish` picks the tag (see above), **claims** it, and runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree) with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
-4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
-5. It records *done* or *failed* (who, where, when, exit code, end of the log). A failed tag waits for `--retry` or a new tag. `publish <tag> --release` drops a claim by hand.
-
-Deploy secrets stay on the client that builds: in `.env.publish` (add it to `.gitignore`), in your shell, or as environment secrets of the Claude Code container. Values from `${NAME}` references and from the env file are masked as `***` in the build output, both on screen and in the log recorded on the publish branch. The MCP's `publish_status` shows the pipeline from chat.
-
-## Local flow: the Claude Code plugin
-
-```text
-/plugin marketplace add Lamartio/kanbai
-/plugin install kanbai@kanbai
-```
-
-The plugin connects Claude Code to the MCP server (edit `plugin/.mcp.json` if your URL differs), adds the `kanbai` skill, and adds `/publish`. Claude then reserves numbers with `reserve_numbers` and edits files with the CLI, so parallel agents stay fast and never collide. You commit the board changes with the code.
-
-The CLI works on its own too:
-
-```sh
-node plugin/bin/kanbai.mjs --help
-```
-
-After changing `packages/core` or `packages/cli`, rebuild it with `bun run --filter @kanbai/cli build`.
