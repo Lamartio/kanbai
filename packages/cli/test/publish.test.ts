@@ -23,7 +23,7 @@ function clone(name: string): Git {
   return new Git(dir);
 }
 
-const config = (command: string, leaseMinutes = 30, requires: string[] = []): PublishConfig => ({ command, tags: 'v*', leaseMinutes, branch: 'kanbai/publish', requires });
+const config = (command: string, leaseMinutes = 30, env: Record<string, string> = {}): PublishConfig => ({ command, tags: 'v*', leaseMinutes, branch: 'kanbai/publish', env, envFile: '.env.publish' });
 const BRANCH = 'kanbai/publish';
 
 beforeEach(() => {
@@ -129,11 +129,28 @@ describe('git-based publish', () => {
     expect(await publish(b, config('true'), { log: quiet, tag: 'v0.1.0' })).toMatchObject({ outcome: 'busy' });
   });
 
-  it('checks required secrets before claiming anything', async () => {
-    const result = await publish(a, config('true', 30, ['KANBAI_TEST_SURELY_UNSET']), { log: quiet });
-    expect(result.outcome === 'nothing' && result.reason).toContain('KANBAI_TEST_SURELY_UNSET');
+  it('checks secret references before claiming anything', async () => {
+    const result = await publish(a, config('true', 30, { TOKEN: '${KANBAI_TEST_SURELY_UNSET}' }), { log: quiet });
+    expect(result.outcome === 'nothing' && result.reason).toContain('KANBAI_TEST_SURELY_UNSET is not set');
     a.sync(BRANCH);
     expect(a.events()).toEqual([]);
+  });
+
+  it('passes plain values and secrets from the untracked env file', async () => {
+    writeFileSync(join(a.cwd, '.env.publish'), 'DEPLOY_TOKEN=s3cret\n');
+    const out = join(base, 'env.txt');
+    const result = await publish(a, config(`echo "$STAGE $TOKEN" > "${out}"`, 30, { STAGE: 'production', TOKEN: '${DEPLOY_TOKEN}' }), { log: quiet });
+    expect(result.outcome).toBe('done');
+    expect(readFileSync(out, 'utf8')).toBe('production s3cret\n');
+    // The secret never ends up in the publish branch.
+    expect(JSON.stringify(a.events())).not.toContain('s3cret');
+  });
+
+  it('refuses an env file that git tracks', async () => {
+    writeFileSync(join(a.cwd, '.env.publish'), 'DEPLOY_TOKEN=oops\n');
+    git(a.cwd, 'add', '.env.publish');
+    const result = await publish(a, config('true', 30, { TOKEN: '${DEPLOY_TOKEN}' }), { log: quiet });
+    expect(result.outcome === 'nothing' && result.reason).toContain('tracked by git');
   });
 
   it('only builds the newest tag; older open tags are superseded', async () => {

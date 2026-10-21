@@ -44,3 +44,16 @@ describe('publish rules', () => {
     expect(state.lock).toBeUndefined();
   });
 });
+
+describe('publish env', () => {
+  it('parses env files', async () => {
+    const { parseEnvFile } = await import('../src/index.js');
+    expect(parseEnvFile('# deploy\nexport TOKEN="abc 123"\nACCOUNT=a1 # comment\n\nBAD LINE\nQUOTED=\'x#y\'')).toEqual({ TOKEN: 'abc 123', ACCOUNT: 'a1', QUOTED: 'x#y' });
+  });
+
+  it('passes plain values and fills references from the client', async () => {
+    const { resolvePublishEnv } = await import('../src/index.js');
+    expect(resolvePublishEnv({ NODE_ENV: 'production', AUTH: 'Bearer ${TOKEN}' }, { TOKEN: 't' })).toEqual({ ok: true, env: { NODE_ENV: 'production', AUTH: 'Bearer t' } });
+    expect(resolvePublishEnv({ A: '${X}', B: '${Y}-${X}' }, { Y: 'y' })).toEqual({ ok: false, missing: ['X'] });
+  });
+});

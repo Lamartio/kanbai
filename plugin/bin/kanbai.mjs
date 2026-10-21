@@ -7021,11 +7021,20 @@ function resolveConfig(raw, existingDirs = []) {
     const branch = publish.branch ?? "kanbai/publish";
     if (typeof branch !== "string" || !/^[\w.-]+(\/[\w.-]+)*$/.test(branch))
       return { ok: false, error: '"publish.branch" must be a branch name.' };
-    const requires = publish.requires ?? [];
-    if (!Array.isArray(requires) || !requires.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
-      return { ok: false, error: '"publish.requires" must be a list of environment variable names.' };
+    const env = publish.env ?? {};
+    if (typeof env !== "object" || env === null || Array.isArray(env))
+      return { ok: false, error: '"publish.env" must be an object of NAME: value.' };
+    for (const [name, value] of Object.entries(env)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+        return { ok: false, error: `"publish.env" has an invalid variable name: ${name}.` };
+      if (typeof value !== "string")
+        return { ok: false, error: `"publish.env.${name}" must be a string.` };
     }
-    config.publish = { command: publish.command, tags, leaseMinutes, branch, requires };
+    const envFile = publish.envFile ?? ".env.publish";
+    if (typeof envFile !== "string" || !envFile.trim() || envFile.startsWith("/") || envFile.includes("..")) {
+      return { ok: false, error: '"publish.envFile" must be a path inside the repo.' };
+    }
+    config.publish = { command: publish.command, tags, leaseMinutes, branch, env, envFile };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== "string")
@@ -7993,10 +8002,43 @@ function publishStatuses(tags, events, now = new Date) {
     return { tag, commit, state, lock, done, failed };
   });
 }
+// ../core/src/env.ts
+var REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+function parseEnvFile(text) {
+  const values = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#"))
+      continue;
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!match)
+      continue;
+    let value = match[2].trim();
+    if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))
+      value = value.slice(1, -1);
+    else
+      value = value.replace(/\s+#.*$/, "");
+    values[match[1]] = value;
+  }
+  return values;
+}
+function resolvePublishEnv(env, source) {
+  const missing = new Set;
+  const resolved = {};
+  for (const [name, value] of Object.entries(env)) {
+    resolved[name] = value.replace(REFERENCE, (_, ref) => {
+      const found = source[ref];
+      if (found === undefined || found === "")
+        missing.add(ref);
+      return found ?? "";
+    });
+  }
+  return missing.size ? { ok: false, missing: [...missing] } : { ok: true, env: resolved };
+}
 // src/publish.ts
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 var TRACKING = "refs/kanbai/publish";
@@ -8109,11 +8151,34 @@ function appendWithRetry(git, config, makeEvent, check) {
   }
   return { ok: false, reason: "The publish branch kept changing; try again." };
 }
+function publishEnvironment(git, config) {
+  const file = join(git.cwd, ...config.envFile.split("/"));
+  let fromFile = {};
+  if (existsSync(file)) {
+    if (git.tryRun(["ls-files", "--error-unmatch", config.envFile]).ok) {
+      return { ok: false, reason: `${config.envFile} is tracked by git, so its secrets are in the repo history. Remove it from git (git rm --cached ${config.envFile}), add it to .gitignore, and rotate the secrets in it.` };
+    }
+    fromFile = parseEnvFile(readFileSync(file, "utf8"));
+  }
+  const source = { ...fromFile, ...process.env };
+  const resolved = resolvePublishEnv(config.env, source);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      reason: `This client can't deploy: ${resolved.missing.join(", ")} ${resolved.missing.length > 1 ? "are" : "is"} not set. Set ${resolved.missing.length > 1 ? "them" : "it"} in this machine's environment (in a Claude Code container: its environment secrets), or in ${config.envFile}. Nothing was claimed.`
+    };
+  }
+  const env = {};
+  for (const [name, value] of Object.entries(source))
+    if (value !== undefined)
+      env[name] = value;
+  return { ok: true, env: { ...env, ...resolved.env } };
+}
 async function publish2(git, config, options) {
   git.sync(config.branch);
-  const missing = config.requires.filter((name) => !process.env[name]);
-  if (missing.length)
-    return { outcome: "nothing", reason: `This client can't deploy: missing environment variable${missing.length > 1 ? "s" : ""} ${missing.join(", ")}. Nothing was claimed.` };
+  const environment = publishEnvironment(git, config);
+  if (!environment.ok)
+    return { outcome: "nothing", reason: environment.reason };
   const first = decide(tagStatuses(git, config), config, options.tag, options.retry);
   if (!first.go)
     return first.result;
@@ -8168,7 +8233,7 @@ async function publish2(git, config, options) {
       const child = spawn(config.command, {
         cwd: dir,
         shell: true,
-        env: { ...process.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
+        env: { ...environment.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
         stdio: ["ignore", "pipe", "pipe"]
       });
       const collect = (chunk) => {
@@ -8211,12 +8276,12 @@ function releaseLock(git, config, tag) {
 }
 
 // src/workspace.ts
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync as rmSync2, statSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, readdirSync, rmSync as rmSync2, statSync, writeFileSync } from "node:fs";
 import { dirname, join as join2, relative, sep } from "node:path";
 function findRoot(start) {
   let dir = start;
   for (;; ) {
-    if (existsSync(join2(dir, ".git")) || existsSync(join2(dir, CONFIG_PATH)))
+    if (existsSync2(join2(dir, ".git")) || existsSync2(join2(dir, CONFIG_PATH)))
       return dir;
     const parent = dirname(dir);
     if (parent === dir)
@@ -8227,7 +8292,7 @@ function findRoot(start) {
 var TEXT = /\.(mdx?|json|ya?ml|d2|txt)$/i;
 function walk(root, dir, files, dirs) {
   const absolute = join2(root, dir);
-  if (!existsSync(absolute) || !statSync(absolute).isDirectory())
+  if (!existsSync2(absolute) || !statSync(absolute).isDirectory())
     return;
   dirs.push(dir);
   for (const entry of readdirSync(absolute, { withFileTypes: true })) {
@@ -8237,13 +8302,13 @@ function walk(root, dir, files, dirs) {
     if (entry.isDirectory())
       walk(root, path, files, dirs);
     else if (TEXT.test(entry.name))
-      files[path] = readFileSync(join2(root, path), "utf8");
+      files[path] = readFileSync2(join2(root, path), "utf8");
   }
 }
 function loadWorkspace(root) {
   const configPath = join2(root, CONFIG_PATH);
-  const raw = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
-  const existing = FALLBACK_BOARDS.filter((dir) => existsSync(join2(root, dir)));
+  const raw = existsSync2(configPath) ? readFileSync2(configPath, "utf8") : undefined;
+  const existing = FALLBACK_BOARDS.filter((dir) => existsSync2(join2(root, dir)));
   const resolved = resolveConfig(raw, existing);
   if (!resolved.ok)
     throw new Error(resolved.error);
@@ -8264,7 +8329,7 @@ function applyChanges(root, changes) {
     if (!absolute.startsWith(root + sep) && absolute !== root)
       throw new Error(`Refusing to write outside the repo: ${change.path}`);
     if (change.content === null) {
-      if (existsSync(absolute))
+      if (existsSync2(absolute))
         rmSync2(absolute);
     } else {
       mkdirSync(dirname(absolute), { recursive: true });

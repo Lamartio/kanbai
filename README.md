@@ -127,7 +127,11 @@ Build and deploy on your own machine or in a Claude Code container. Git decides 
 {
   "publish": {
     "command": "./scripts/deploy.sh",
-    "requires": ["CLOUDFLARE_API_TOKEN"],
+    "env": {
+      "NODE_ENV": "production",
+      "CLOUDFLARE_ACCOUNT_ID": "a1b2c3",
+      "CLOUDFLARE_API_TOKEN": "${CLOUDFLARE_API_TOKEN}"
+    },
     "tags": "v*",
     "leaseMinutes": 30,
     "branch": "kanbai/publish"
@@ -138,7 +142,8 @@ Build and deploy on your own machine or in a Claude Code container. Git decides 
 | Setting | Meaning | Default |
 | --- | --- | --- |
 | `command` | Shell command that builds and deploys, run in a clean checkout of the tag. A script in the repo (`./scripts/deploy.sh`) or a package script (`npm ci && npm run deploy`). Gets `KANBAI_TAG` and `KANBAI_COMMIT`. | required |
-| `requires` | Environment variables the command needs, usually deploy secrets. Checked before claiming, so a client without them refuses instead of failing halfway. | none |
+| `env` | Variables for the command. Plain values are passed as they are. `${NAME}` takes NAME from the client: its environment, or `envFile`. Missing ones stop publish before anything is claimed, so a client without the token refuses instead of failing halfway. Never put secret values here: this file is committed. | none |
+| `envFile` | A file on the client with `KEY=value` lines, for secrets like deploy tokens. Keep it out of git: kanbai refuses to use it when git tracks it. The real environment wins over the file. | `.env.publish` |
 | `tags` | Which tags count as versions. | `v*` |
 | `leaseMinutes` | How long a claim lasts without renewal before another client may take over. | 30 |
 | `branch` | Branch that holds the publish events. | `kanbai/publish` |
@@ -163,7 +168,7 @@ How it works:
 4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
 5. It records *done* or *failed* (who, where, when, exit code, end of the log). A failed tag waits for `--retry` or a new tag. `publish <tag> --release` drops a claim by hand.
 
-Deploy secrets stay on the client that builds: set them in your shell, or as environment secrets of the Claude Code container. The MCP's `publish_status` shows the pipeline from chat.
+Deploy secrets stay on the client that builds: in `.env.publish` (add it to `.gitignore`), in your shell, or as environment secrets of the Claude Code container. The MCP's `publish_status` shows the pipeline from chat.
 
 ## Local flow: the Claude Code plugin
 

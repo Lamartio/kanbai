@@ -5,10 +5,10 @@
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type EventKind, type PublishConfig, type PublishEvent, type TagStatus, parseEvent, publishStatuses } from '@kanbai/core';
+import { type EventKind, type PublishConfig, type PublishEvent, type TagStatus, parseEnvFile, parseEvent, publishStatuses, resolvePublishEnv } from '@kanbai/core';
 
 export type { PublishEvent, TagStatus } from '@kanbai/core';
 
@@ -166,11 +166,39 @@ function appendWithRetry(git: Git, config: PublishConfig, makeEvent: () => Publi
   return { ok: false, reason: 'The publish branch kept changing; try again.' };
 }
 
+/**
+ * The command's environment: this client's environment, plus the untracked env file, with
+ * `publish.env` on top (`${NAME}` filled in). Refuses an env file that git tracks, so secrets
+ * never get committed by accident.
+ */
+export function publishEnvironment(git: Git, config: PublishConfig): { ok: true; env: Record<string, string> } | { ok: false; reason: string } {
+  const file = join(git.cwd, ...config.envFile.split('/'));
+  let fromFile: Record<string, string> = {};
+  if (existsSync(file)) {
+    if (git.tryRun(['ls-files', '--error-unmatch', config.envFile]).ok) {
+      return { ok: false, reason: `${config.envFile} is tracked by git, so its secrets are in the repo history. Remove it from git (git rm --cached ${config.envFile}), add it to .gitignore, and rotate the secrets in it.` };
+    }
+    fromFile = parseEnvFile(readFileSync(file, 'utf8'));
+  }
+  // This machine's real environment wins over the file.
+  const source: Record<string, string | undefined> = { ...fromFile, ...process.env };
+  const resolved = resolvePublishEnv(config.env, source);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      reason: `This client can't deploy: ${resolved.missing.join(', ')} ${resolved.missing.length > 1 ? 'are' : 'is'} not set. Set ${resolved.missing.length > 1 ? 'them' : 'it'} in this machine's environment (in a Claude Code container: its environment secrets), or in ${config.envFile}. Nothing was claimed.`,
+    };
+  }
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(source)) if (value !== undefined) env[name] = value;
+  return { ok: true, env: { ...env, ...resolved.env } };
+}
+
 /** Picks the tag, claims it, runs the command in a clean checkout, and records the outcome. */
 export async function publish(git: Git, config: PublishConfig, options: PublishOptions): Promise<PublishResult> {
   git.sync(config.branch);
-  const missing = config.requires.filter((name) => !process.env[name]);
-  if (missing.length) return { outcome: 'nothing', reason: `This client can't deploy: missing environment variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')}. Nothing was claimed.` };
+  const environment = publishEnvironment(git, config);
+  if (!environment.ok) return { outcome: 'nothing', reason: environment.reason };
   const first = decide(tagStatuses(git, config), config, options.tag, options.retry);
   if (!first.go) return first.result;
   if (options.dryRun) return { outcome: 'dry-run', tag: first.status.tag };
@@ -229,7 +257,7 @@ export async function publish(git: Git, config: PublishConfig, options: PublishO
       const child = spawn(config.command, {
         cwd: dir,
         shell: true,
-        env: { ...process.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
+        env: { ...environment.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const collect = (chunk: Buffer) => {

@@ -23,8 +23,14 @@ export interface PublishConfig {
   leaseMinutes: number;
   /** Branch that holds the publish events (claims, outcomes). Default: kanbai/publish. */
   branch: string;
-  /** Environment variables the command needs (deploy secrets). Checked before claiming. */
-  requires: string[];
+  /**
+   * Environment for the command. Plain values are passed as they are; `${NAME}` takes NAME from the
+   * client (its environment, or `envFile`). Missing references stop publish before anything is claimed.
+   * Never put secret values here: this file is committed.
+   */
+  env: Record<string, string>;
+  /** Untracked file with KEY=value lines on the client, e.g. deploy tokens. Default: .env.publish. */
+  envFile: string;
 }
 
 export const CONFIG_PATH = '.board.json';
@@ -103,11 +109,17 @@ export function resolveConfig(raw: string | undefined, existingDirs: Iterable<st
     if (typeof leaseMinutes !== 'number' || !(leaseMinutes > 0)) return { ok: false, error: '"publish.leaseMinutes" must be a positive number.' };
     const branch = publish.branch ?? 'kanbai/publish';
     if (typeof branch !== 'string' || !/^[\w.-]+(\/[\w.-]+)*$/.test(branch)) return { ok: false, error: '"publish.branch" must be a branch name.' };
-    const requires = publish.requires ?? [];
-    if (!Array.isArray(requires) || !requires.every((name) => typeof name === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
-      return { ok: false, error: '"publish.requires" must be a list of environment variable names.' };
+    const env = publish.env ?? {};
+    if (typeof env !== 'object' || env === null || Array.isArray(env)) return { ok: false, error: '"publish.env" must be an object of NAME: value.' };
+    for (const [name, value] of Object.entries(env)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return { ok: false, error: `"publish.env" has an invalid variable name: ${name}.` };
+      if (typeof value !== 'string') return { ok: false, error: `"publish.env.${name}" must be a string.` };
     }
-    config.publish = { command: publish.command, tags, leaseMinutes, branch, requires: requires as string[] };
+    const envFile = publish.envFile ?? '.env.publish';
+    if (typeof envFile !== 'string' || !envFile.trim() || envFile.startsWith('/') || envFile.includes('..')) {
+      return { ok: false, error: '"publish.envFile" must be a path inside the repo.' };
+    }
+    config.publish = { command: publish.command, tags, leaseMinutes, branch, env: env as Record<string, string>, envFile };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== 'string') return { ok: false, error: '"archive" must be a lane name.' };
