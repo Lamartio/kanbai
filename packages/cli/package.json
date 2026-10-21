@@ -1,0 +1,14 @@
+{
+  "name": "@kanbai/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "kanbai": "./dist/kanbai.mjs" },
+  "scripts": {
+    "build": "bun build src/main.ts --target node --format esm --outfile ../../plugin/bin/kanbai.mjs && cp ../../plugin/bin/kanbai.mjs dist/kanbai.mjs 2>/dev/null || true",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@kanbai/core": "workspace:*" },
+  "devDependencies": { "@types/node": "^22", "typescript": "^5", "vitest": "^5.0.5" }
+}

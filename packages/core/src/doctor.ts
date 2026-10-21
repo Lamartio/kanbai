@@ -61,6 +61,7 @@ export function runDoctor(snapshot: Snapshot, board: LoadedBoard, config: BoardC
   const fixedIssues = new Map<string, Issue>();
   const proposed: FileChange[] = [];
   const numbersNeeded = new Map<string, number>();
+  const renumberedIssues: { from: string; issue: Issue }[] = [];
   const fix = (issue: Issue, note: string, change: (issue: Issue) => Issue) => {
     const base = fixedIssues.get(issue.path) ?? issue;
     const next = change(base);
@@ -74,6 +75,30 @@ export function runDoctor(snapshot: Snapshot, board: LoadedBoard, config: BoardC
 
   for (const entry of board.invalid) {
     problems.push({ code: 'invalid-file', severity: 'error', message: entry.error, path: entry.path, fix: 'manual' });
+  }
+
+  for (const issue of board.issues) {
+    const id = formatId(issue.board, issue.number);
+    if (!config.lanes.includes(issue.frontmatter.status)) {
+      const lane = config.lanes[0]!;
+      problems.push({ code: 'unknown-lane', severity: 'warning', message: `${id} is in unknown lane "${issue.frontmatter.status}"; moved to "${lane}".`, path: issue.path, fix: 'auto' });
+      fix(issue, `lane "${issue.frontmatter.status}" doesn't exist, moved to ${lane}.`, (current) => ({ ...current, frontmatter: { ...current.frontmatter, status: lane } }));
+    }
+    if (!issue.frontmatter.title.trim()) {
+      const title = titleFromSlug(issue.slug);
+      problems.push({ code: 'missing-title', severity: 'warning', message: `${id} has no title; set to "${title}".`, path: issue.path, fix: 'auto' });
+      fix(issue, 'added a missing title from the file name.', (current) => ({ ...current, frontmatter: { ...current.frontmatter, title } }));
+    }
+    for (const kind of LINK_KINDS) {
+      for (const number of issue.frontmatter.links[kind] ?? []) {
+        if (!board.issues.some((other) => other.board === issue.board && other.number === number)) {
+          problems.push({ code: 'missing-link-target', severity: 'warning', message: `${id} links (${kind}) to ${formatId(issue.board, number)}, which doesn't exist.`, path: issue.path, fix: 'manual' });
+        }
+      }
+    }
+    if (issue.parentPath && !snapshot.files[issue.parentPath]) {
+      problems.push({ code: 'missing-parent', severity: 'warning', message: `${id} sits in a sub-issue folder, but its parent ${issue.parentPath} doesn't exist.`, path: issue.path, fix: 'manual' });
+    }
   }
 
   // Duplicates: the oldest issue keeps the number, the others get fresh ones.
@@ -99,41 +124,19 @@ export function runDoctor(snapshot: Snapshot, board: LoadedBoard, config: BoardC
         problems.push({ code: 'duplicate-number', severity: 'error', message: `${id} is used twice. ${keeper!.path} keeps it; ${other.path} needs a fresh number.`, path: other.path, fix: 'proposed' });
         continue;
       }
+      const base = fixedIssues.get(other.path) ?? other;
       const name = other.path.slice(other.path.lastIndexOf('/') + 1);
       const newName = name.replace(new RegExp(`(^|_)${padNumber(other.number)}_`), `$1${padNumber(fresh)}_`);
       const newPath = `${other.path.slice(0, other.path.lastIndexOf('/') + 1)}${newName}`;
       const renumbered: Issue = {
-        ...other,
+        ...base,
         number: fresh,
         path: newPath,
-        body: appendLog(other.body, options.today, `Doctor: renumbered from ${id} to ${formatId(other.board, fresh)}, because ${keeper!.path} already had ${id}.`),
+        body: appendLog(base.body, options.today, `Doctor: renumbered from ${id} to ${formatId(other.board, fresh)}, because ${keeper!.path} already had ${id}.`),
       };
       proposed.push({ path: other.path, content: null }, { path: newPath, content: serializeIssue(renumbered) });
+      renumberedIssues.push({ from: other.path, issue: renumbered });
       problems.push({ code: 'duplicate-number', severity: 'error', message: `${id} is used twice. ${keeper!.path} keeps it; ${other.path} becomes ${formatId(other.board, fresh)}. Check references to ${id} afterwards.`, path: other.path, fix: 'proposed' });
-    }
-  }
-
-  for (const issue of board.issues) {
-    const id = formatId(issue.board, issue.number);
-    if (!config.lanes.includes(issue.frontmatter.status)) {
-      const lane = config.lanes[0]!;
-      problems.push({ code: 'unknown-lane', severity: 'warning', message: `${id} is in unknown lane "${issue.frontmatter.status}"; moved to "${lane}".`, path: issue.path, fix: 'auto' });
-      fix(issue, `lane "${issue.frontmatter.status}" doesn't exist, moved to ${lane}.`, (current) => ({ ...current, frontmatter: { ...current.frontmatter, status: lane } }));
-    }
-    if (!issue.frontmatter.title.trim()) {
-      const title = titleFromSlug(issue.slug);
-      problems.push({ code: 'missing-title', severity: 'warning', message: `${id} has no title; set to "${title}".`, path: issue.path, fix: 'auto' });
-      fix(issue, 'added a missing title from the file name.', (current) => ({ ...current, frontmatter: { ...current.frontmatter, title } }));
-    }
-    for (const kind of LINK_KINDS) {
-      for (const number of issue.frontmatter.links[kind] ?? []) {
-        if (!board.issues.some((other) => other.board === issue.board && other.number === number)) {
-          problems.push({ code: 'missing-link-target', severity: 'warning', message: `${id} links (${kind}) to ${formatId(issue.board, number)}, which doesn't exist.`, path: issue.path, fix: 'manual' });
-        }
-      }
-    }
-    if (issue.parentPath && !snapshot.files[issue.parentPath]) {
-      problems.push({ code: 'missing-parent', severity: 'warning', message: `${id} sits in a sub-issue folder, but its parent ${issue.parentPath} doesn't exist.`, path: issue.path, fix: 'manual' });
     }
   }
 
@@ -175,6 +178,12 @@ export function runDoctor(snapshot: Snapshot, board: LoadedBoard, config: BoardC
       problems.push({ code: 'extra-board-file', severity: 'info', message: `${extra} duplicates ${info.filePath}; removed.`, path: extra, fix: 'auto' });
       safe.push({ path: extra, content: null });
     }
+  }
+  // With the proposed fixes applied, the board files change again: they go with the proposals.
+  if (renumberedIssues.length) {
+    const moved = new Set(renumberedIssues.map((entry) => entry.from));
+    const issues = [...board.issues.filter((issue) => !moved.has(issue.path)).map((issue) => fixedIssues.get(issue.path) ?? issue), ...renumberedIssues.map((entry) => entry.issue)];
+    proposed.push(...boardChanges({ ...board, issues }, config, [], board.boards.keys()));
   }
   return { problems, safe, proposed, numbersNeeded };
 }

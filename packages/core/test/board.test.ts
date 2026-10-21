@@ -188,7 +188,9 @@ describe('doctor', () => {
     expect(second.proposed.map((change) => [change.path, change.content === null])).toEqual([
       ['docs/board/001_b.md', true],
       ['docs/board/003_b.md', false],
+      ['docs/board/000_board.md', false],
     ]);
+    expect(second.proposed[2]!.content).toContain('[003 B](./003_b.md)');
     expect(second.safe.find((change) => change.path === 'docs/board/002_c.md')?.content).toContain('status: idea');
   });
 

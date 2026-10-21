@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kanbai": {
+      "type": "http",
+      "url": "https://kanbai.lamartio.workers.dev/mcp"
+    }
+  }
+}

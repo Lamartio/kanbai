@@ -1,0 +1,11 @@
+{
+  "name": "kanbai",
+  "owner": { "name": "Lamartio" },
+  "plugins": [
+    {
+      "name": "kanbai",
+      "source": "./plugin",
+      "description": "Markdown kanban board in your repo, with atomic issue numbers."
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "kanbai",
+  "version": "0.1.0",
+  "description": "Keep a kanban board and docs as markdown in your repo: atomic issue numbers from the kanbai MCP, file edits locally for fast parallel agents.",
+  "author": { "name": "Lamartio" },
+  "repository": "https://github.com/Lamartio/kanbai"
+}

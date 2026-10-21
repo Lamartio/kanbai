@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kanbai",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    // Your Worker's public URL, without a trailing slash. Change it after the first deploy if it differs.
+    "PUBLIC_URL": "https://kanbai.lamartio.workers.dev"
+  },
+  "kv_namespaces": [
+    // Create both with `npx wrangler kv namespace create OAUTH_KV` / `BOARD_KV` and paste the ids.
+    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_OAUTH_KV_ID" },
+    { "binding": "BOARD_KV", "id": "REPLACE_WITH_BOARD_KV_ID" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "DISPENSER", "class_name": "NumberDispenser" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NumberDispenser"] }],
+  "observability": { "enabled": true }
+}
