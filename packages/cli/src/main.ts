@@ -308,11 +308,11 @@ async function main(argv: string[]) {
       const settings = config.publish ?? fail('add a "publish" section to .board.json first, e.g. { "publish": { "command": "npm ci && npm run deploy" } }.');
       const git = new Git(root);
       if (values.list) {
-        git.sync();
+        git.sync(settings.branch);
         const statuses = tagStatuses(git, settings);
         const describe = (status: ReturnType<typeof tagStatuses>[number]) => {
           const marker = status.lock ?? status.done ?? status.failed;
-          const detail = marker ? ` — ${marker.by} on ${marker.host}, ${marker.finished ?? marker.at}${status.failed && !status.done ? `, exit ${status.failed.exitCode}` : ''}` : '';
+          const detail = marker ? ` — ${marker.by} on ${marker.host}, ${marker.at}${status.failed && !status.done ? `, exit ${status.failed.exitCode}` : ''}` : '';
           return `${status.tag}\t${status.state}${detail}`;
         };
         out(statuses.map(describe).join('\n') || `No tags match "${settings.tags}".`, statuses);
@@ -320,7 +320,7 @@ async function main(argv: string[]) {
       }
       if (values.release) {
         const tag = rest[0] ?? fail('--release needs the tag whose claim to drop.');
-        out(releaseLock(git, tag) ? `Dropped the claim on ${tag}.` : `There was no claim on ${tag}.`);
+        out(releaseLock(git, settings, tag) ? `Dropped the claim on ${tag}.` : `There was no claim on ${tag}.`);
         return;
       }
       const result = await publish(git, settings, { tag: rest[0], retry: values.retry, dryRun: values['dry-run'], log: (line) => process.stderr.write(`${line}\n`) });

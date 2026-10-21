@@ -114,6 +114,7 @@ npx wrangler dev
 | `search_issues`, `search_docs` | Find issues by filters, or anything in the docs. |
 | `context_pack` | Everything needed to start on an issue, in one call. |
 | `doctor` | Finds and fixes problems after hand edits: duplicates, unknown lanes, stale board files, a lagging number counter. |
+| `tag_release` | Creates the next version tag (major, minor, patch) after a preview. |
 | `publish_status` | Read-only view of the publish pipeline per tag (see below). |
 
 Every write is one commit on the default branch. If someone pushed in between, the server reads again and retries.
@@ -123,24 +124,25 @@ Every write is one commit on the default branch. If someone pushed in between, t
 Build and deploy on your own machine or in a Claude Code container. Git decides who builds a tag, so two clients never deploy the same release.
 
 ```json
-{ "publish": { "command": "npm ci && npm run deploy", "tags": "v*", "leaseMinutes": 30 } }
+{ "publish": { "command": "npm ci && npm run deploy", "tags": "v*", "leaseMinutes": 30, "branch": "kanbai/publish" } }
 ```
 
 ```sh
-git tag v1.4.0 && git push --tags
 node plugin/bin/kanbai.mjs publish          # or /publish in Claude Code
 node plugin/bin/kanbai.mjs publish --list   # pending, building, done, failed per tag
 ```
 
+Create the tag with `git tag v1.4.0 && git push --tags` on your computer, or from chat with the MCP's `tag_release` (bump major, minor or patch). Claude Code's cloud containers can't push tags, so from the iPad use `tag_release`.
+
 How it works:
 
-1. `publish` takes the newest tag matching `publish.tags` that isn't done yet. Older open tags are *superseded*.
-2. It **claims** the tag by pushing `refs/kanbai/lock/<tag>`. The remote refuses to create a ref that already exists, so of two clients claiming at once, exactly one wins; the other reports who is building.
-3. It runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree), with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
+1. Everything is recorded on one branch, `kanbai/publish`. Each commit on it is one event (a claim, a renewal, done, failed, a manual release), with an empty tree and a JSON message. `git log kanbai/publish` is the deploy history.
+2. Every write is a normal **fast-forward push** of one new commit. When two clients write at the same moment, the remote accepts one and rejects the other: that is the lock. Nothing is force-pushed or deleted, so it also works through restrictive git proxies such as Claude Code's cloud containers.
+3. `publish` takes the newest tag matching `publish.tags` that isn't done yet (older open tags are *superseded*), **claims** it, and runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree) with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
 4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
-5. It records `refs/kanbai/done/<tag>` or `refs/kanbai/failed/<tag>` (who, where, when, exit code, end of the log) and drops the claim, in one atomic push. A failed tag waits for `--retry` or a new tag.
+5. It records *done* or *failed* (who, where, when, exit code, end of the log). A failed tag waits for `--retry` or a new tag. `publish <tag> --release` drops a claim by hand.
 
-The refs live outside branches and tags, so they don't clutter GitHub. Deploy secrets stay on the client that builds: set them in your shell, or as environment secrets of the Claude Code container. `publish <tag> --release` drops a claim by hand.
+Deploy secrets stay on the client that builds: set them in your shell, or as environment secrets of the Claude Code container. The MCP's `publish_status` shows the pipeline from chat.
 
 ## Local flow: the Claude Code plugin
 

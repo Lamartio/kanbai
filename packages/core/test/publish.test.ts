@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareVersionsDesc, matchesTagPattern, publishStatuses } from '../src/index.js';
+import { compareVersionsDesc, matchesTagPattern, publishStatuses, replayEvents } from '../src/index.js';
 
 describe('publish rules', () => {
   it('sorts versions newest first by their numbers', () => {
@@ -20,7 +20,7 @@ describe('publish rules', () => {
         { tag: 'v1.2.0', commit: 'c' },
         { tag: 'v1.1.0', commit: 'b' },
       ],
-      new Map([['v1.2.0', { lock: { tag: 'v1.2.0', commit: 'c', by: 'x', host: 'y', at: '', expires: '2026-10-21T11:00:00Z' } }]]),
+      [{ kind: 'claim', tag: 'v1.2.0', commit: 'c', claim: 'k', by: 'x', host: 'y', at: '', expires: '2026-10-21T11:00:00Z' }],
       now,
     );
     expect(statuses.map((status) => [status.tag, status.state])).toEqual([
@@ -28,5 +28,19 @@ describe('publish rules', () => {
       ['v1.1.0', 'superseded'],
       ['v1.0.0', 'superseded'],
     ]);
+  });
+
+  it('replays claims, renewals and outcomes per claim', () => {
+    const base = { tag: 'v1', commit: 'c', by: 'a', host: 'h', at: '' } as const;
+    const state = replayEvents([
+      { ...base, kind: 'claim', claim: 'one' },
+      { ...base, kind: 'failed', claim: 'one', exitCode: 2 },
+      { ...base, kind: 'claim', claim: 'two' },
+      { ...base, kind: 'renew', claim: 'one' },
+      { ...base, kind: 'done', claim: 'two' },
+    ]).get('v1')!;
+    expect(state.done?.claim).toBe('two');
+    expect(state.failed).toBeUndefined();
+    expect(state.lock).toBeUndefined();
   });
 });

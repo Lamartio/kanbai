@@ -23,7 +23,8 @@ function clone(name: string): Git {
   return new Git(dir);
 }
 
-const config = (command: string, leaseMinutes = 30): PublishConfig => ({ command, tags: 'v*', leaseMinutes });
+const config = (command: string, leaseMinutes = 30): PublishConfig => ({ command, tags: 'v*', leaseMinutes, branch: 'kanbai/publish' });
+const BRANCH = 'kanbai/publish';
 
 beforeEach(() => {
   base = mkdtempSync(join(tmpdir(), 'kanbai-publish-test-'));
@@ -52,8 +53,10 @@ describe('git-based publish', () => {
     // Another client sees it as done and does nothing.
     const again = await publish(b, config('exit 1'), { log: quiet });
     expect(again).toMatchObject({ outcome: 'nothing' });
-    b.sync();
+    b.sync(BRANCH);
     expect(tagStatuses(b, config('x'))[0]).toMatchObject({ tag: 'v0.1.0', state: 'done', done: { by: 'alice <alice@example.com>' } });
+    // The branch is a readable deploy log, and nothing else was pushed.
+    expect(git(b.cwd, 'ls-remote', 'origin').split('\n').map((line) => line.split('\t')[1]).sort()).toEqual(['HEAD', 'refs/heads/kanbai/publish', 'refs/heads/main', 'refs/tags/v0.1.0', 'refs/tags/v0.1.0^{}']);
     expect(git(a.cwd, 'worktree', 'list').split('\n')).toHaveLength(1);
   });
 
@@ -68,30 +71,47 @@ describe('git-based publish', () => {
 
   it('marks failures, needs --retry, and clears the failure once it works', async () => {
     expect(await publish(a, config('exit 3'), { log: quiet })).toMatchObject({ outcome: 'failed', exitCode: 3 });
-    b.sync();
+    b.sync(BRANCH);
     expect(tagStatuses(b, config('x'))[0]!.state).toBe('failed');
     expect(await publish(b, config('true'), { log: quiet })).toMatchObject({ outcome: 'nothing' });
     expect(await publish(b, config('true'), { log: quiet, retry: true })).toMatchObject({ outcome: 'done' });
-    a.sync();
+    a.sync(BRANCH);
     const status = tagStatuses(a, config('x'))[0]!;
     expect(status.state).toBe('done');
     expect(status.failed).toBeUndefined();
   });
 
   it('takes over a claim whose lease ran out', async () => {
-    const stale = a.markerCommit({ tag: 'v0.1.0', commit: 'x', by: 'ghost', host: 'gone', at: '2026-01-01T00:00:00Z', expires: '2026-01-01T00:30:00Z' });
-    expect(a.push([`${stale}:refs/kanbai/lock/v0.1.0`]).ok).toBe(true);
-    b.sync();
+    a.sync(BRANCH);
+    expect(a.append(BRANCH, a.head(), { kind: 'claim', tag: 'v0.1.0', commit: 'x', claim: 'ghost-claim', by: 'ghost', host: 'gone', at: '2026-01-01T00:00:00Z', expires: '2026-01-01T00:30:00Z' })).toBe(true);
+    b.sync(BRANCH);
     expect(tagStatuses(b, config('x'))[0]!.state).toBe('stale');
     expect(await publish(b, config('true'), { log: quiet })).toMatchObject({ outcome: 'done' });
   });
 
   it('reports a live claim as busy, and can drop it by hand', async () => {
-    const live = a.markerCommit({ tag: 'v0.1.0', commit: 'x', by: 'alice', host: 'laptop', at: new Date().toISOString(), expires: new Date(Date.now() + 600_000).toISOString() });
-    a.push([`${live}:refs/kanbai/lock/v0.1.0`]);
+    a.sync(BRANCH);
+    a.append(BRANCH, a.head(), { kind: 'claim', tag: 'v0.1.0', commit: 'x', claim: 'alice-claim', by: 'alice', host: 'laptop', at: new Date().toISOString(), expires: new Date(Date.now() + 600_000).toISOString() });
     expect(await publish(b, config('true'), { log: quiet })).toMatchObject({ outcome: 'busy', by: 'alice', host: 'laptop' });
-    expect(releaseLock(b, 'v0.1.0')).toBe(true);
+    expect(releaseLock(b, config('true'), 'v0.1.0')).toBe(true);
     expect(await publish(b, config('true'), { log: quiet })).toMatchObject({ outcome: 'done' });
+  });
+
+  it('rejects a write on a stale head: the fast-forward is the lock', () => {
+    a.sync(BRANCH);
+    b.sync(BRANCH);
+    const event = { kind: 'claim' as const, tag: 'v0.1.0', commit: 'x', claim: 'c', by: 'x', host: 'y', at: '' };
+    expect(a.append(BRANCH, a.head(), { ...event, claim: 'a' })).toBe(true);
+    expect(b.append(BRANCH, b.head(), { ...event, claim: 'b' })).toBe(false);
+  });
+
+  it('keeps renewing a long build', async () => {
+    const result = await publish(a, config('sleep 1'), { log: quiet, heartbeatMs: 200 });
+    expect(result.outcome).toBe('done');
+    const kinds = a.events().map((event) => event.kind);
+    expect(kinds[0]).toBe('claim');
+    expect(kinds.filter((kind) => kind === 'renew').length).toBeGreaterThanOrEqual(2);
+    expect(kinds.at(-1)).toBe('done');
   });
 
   it('only builds the newest tag; older open tags are superseded', async () => {

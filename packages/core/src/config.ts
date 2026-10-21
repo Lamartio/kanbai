@@ -21,6 +21,8 @@ export interface PublishConfig {
   tags: string;
   /** Minutes a claim lasts without a heartbeat before another client may take over. Default: 30. */
   leaseMinutes: number;
+  /** Branch that holds the publish events (claims, outcomes). Default: kanbai/publish. */
+  branch: string;
 }
 
 export const CONFIG_PATH = '.board.json';
@@ -97,7 +99,9 @@ export function resolveConfig(raw: string | undefined, existingDirs: Iterable<st
     const leaseMinutes = publish.leaseMinutes ?? 30;
     if (typeof tags !== 'string' || !tags.trim()) return { ok: false, error: '"publish.tags" must be a tag pattern, like v*.' };
     if (typeof leaseMinutes !== 'number' || !(leaseMinutes > 0)) return { ok: false, error: '"publish.leaseMinutes" must be a positive number.' };
-    config.publish = { command: publish.command, tags, leaseMinutes };
+    const branch = publish.branch ?? 'kanbai/publish';
+    if (typeof branch !== 'string' || !/^[\w.-]+(\/[\w.-]+)*$/.test(branch)) return { ok: false, error: '"publish.branch" must be a branch name.' };
+    config.publish = { command: publish.command, tags, leaseMinutes, branch };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== 'string') return { ok: false, error: '"archive" must be a lane name.' };

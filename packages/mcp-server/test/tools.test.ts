@@ -150,11 +150,26 @@ describe('tools against a fake GitHub', () => {
   it('shows publish states per tag', async () => {
     github.push({ '.board.json': JSON.stringify({ publish: { command: 'npm run deploy' } }) });
     github.tags = ['v1.0.0', 'v1.1.0'];
-    github.markers = [{ name: 'failed/v1.1.0', message: JSON.stringify({ tag: 'v1.1.0', commit: 'x', by: 'danny', host: 'ipad-container', at: '2026-10-21T10:00:00Z', finished: '2026-10-21T10:02:00Z', exitCode: 2, log: 'Error: missing token' }) }];
+    const base = { tag: 'v1.1.0', commit: 'x', claim: 'k', by: 'danny', host: 'ipad-container' };
+    github.events = [
+      JSON.stringify({ ...base, kind: 'claim', at: '2026-10-21T10:00:00Z', expires: '2026-10-21T10:30:00Z' }),
+      JSON.stringify({ ...base, kind: 'failed', at: '2026-10-21T10:02:00Z', exitCode: 2, log: 'Error: missing token' }),
+    ];
     const result = await call('publish_status');
     expect(result.text).toContain('v1.1.0 failed — danny on ipad-container');
     expect(result.text).toContain('Error: missing token');
     expect(result.text).toContain('v1.0.0 superseded');
+  });
+
+  it('tags a release after a preview', async () => {
+    github.tags = ['v1.9.0', 'v1.10.0'];
+    const preview = await call('tag_release', { bump: 'minor' });
+    expect(preview.text).toContain('Preview: tag v1.11.0');
+    expect(github.createdTags).toHaveLength(0);
+    const created = await call('tag_release', { bump: 'minor', confirm: true });
+    expect(created.text).toContain('Created tag v1.11.0');
+    expect(github.createdTags).toEqual([{ ref: 'refs/tags/v1.11.0', sha: github.head }]);
+    expect((await call('tag_release', { tag: 'v1.11.0', confirm: true })).text).toContain('already exists');
   });
 
   it('explains a missing repo instead of crashing', async () => {

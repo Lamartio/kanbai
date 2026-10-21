@@ -152,21 +152,28 @@ export class GitHub {
     return dirs.filter((_, index) => data.repository[`d${index}`]?.__typename === 'Tree');
   }
 
-  /** Version tags (with their commits) and kanbai publish markers, in one query. */
-  async publishRefs(repo: RepoRef): Promise<{ tags: { tag: string; commit: string }[]; markers: { name: string; message: string }[] }> {
-    type Ref = { name: string; target: { oid: string; message?: string; target?: { oid: string } } | null };
-    const data = await this.graphql<{ repository: { tags: { nodes: Ref[] }; kanbai: { nodes: Ref[] } } | null }>(
-      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+  /** Version tags (with their commits) and the publish branch's recent event messages, oldest first, in one query. */
+  async publishData(repo: RepoRef, branch: string): Promise<{ tags: { tag: string; commit: string }[]; messages: string[] }> {
+    type Ref = { name: string; target: { oid: string; target?: { oid: string } } | null };
+    const data = await this.graphql<{
+      repository: { tags: { nodes: Ref[] }; branch: { target: { history: { nodes: { message: string }[] } } | null } | null } | null;
+    }>(
+      `query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) {
         tags: refs(refPrefix: "refs/tags/", first: 100, orderBy: { field: TAG_COMMIT_DATE, direction: DESC }) { nodes { name target { oid ... on Tag { target { oid } } } } }
-        kanbai: refs(refPrefix: "refs/kanbai/", first: 100) { nodes { name target { oid ... on Commit { message } } } }
+        branch: ref(qualifiedName: $branch) { target { ... on Commit { history(first: 100) { nodes { message } } } } }
       } }`,
-      { owner: repo.owner, name: repo.name },
+      { owner: repo.owner, name: repo.name, branch: `refs/heads/${branch}` },
     );
     if (!data.repository) throw new GitHubError(`Repo ${repo.owner}/${repo.name} not found, or not accessible with this login.`, 404);
     return {
       tags: data.repository.tags.nodes.map((ref) => ({ tag: ref.name, commit: ref.target?.target?.oid ?? ref.target?.oid ?? '' })),
-      markers: data.repository.kanbai.nodes.map((ref) => ({ name: ref.name, message: ref.target?.message ?? '' })),
+      messages: [...(data.repository.branch?.target?.history.nodes ?? [])].reverse().map((node) => node.message),
     };
+  }
+
+  /** Creates a lightweight tag pointing at a commit. */
+  async createTag(repo: RepoRef, tag: string, sha: string): Promise<void> {
+    await this.rest(`/repos/${repo.owner}/${repo.name}/git/refs`, { method: 'POST', body: JSON.stringify({ ref: `refs/tags/${tag}`, sha }) });
   }
 
   /** One small file at a commit, as text. Returns null when missing or too large. */

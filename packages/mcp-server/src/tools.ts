@@ -12,10 +12,12 @@ import {
   addComment,
   archiveIssue,
   boardChanges,
+  DEFAULT_PUBLISH_BRANCH,
+  type PublishEvent,
+  compareVersionsDesc,
   matchesTagPattern,
-  parseMarker,
+  parseEvent,
   publishStatuses,
-  type Marker,
   changeLanes,
   contextPack,
   createIssue,
@@ -585,6 +587,46 @@ export function createServer(env: Env, props: Props): McpServer {
   );
 
   server.registerTool(
+    'tag_release',
+    {
+      description:
+        'Creates the next version tag on the default branch\'s latest commit, so a client can publish it (kanbai publish, or /publish in Claude Code). Pass bump (major, minor, patch) or an explicit tag. Without confirm it only shows a preview; show that to the user and call again with confirm: true.',
+      inputSchema: z.object({
+        repo: repoArg,
+        bump: z.enum(['major', 'minor', 'patch']).optional(),
+        tag: z.string().optional().describe('Explicit tag, e.g. v2.0.0-beta.1. Overrides bump.'),
+        confirm: z.boolean().optional(),
+      }),
+    },
+    ({ repo, bump, tag, confirm }) =>
+      guard(async () => {
+        const state = await session.load(repo);
+        const pattern = state.config.publish?.tags ?? 'v*';
+        const data = await session.github.publishData(state.repo, state.config.publish?.branch ?? DEFAULT_PUBLISH_BRANCH);
+        const versions = data.tags.map((entry) => entry.tag).filter((name) => matchesTagPattern(name, pattern)).sort(compareVersionsDesc);
+        const latest = versions.find((name) => /\d+\.\d+\.\d+$/.test(name));
+        let next = tag?.trim();
+        if (!next) {
+          if (!bump) throw new UserError('Pass bump (major, minor or patch) or an explicit tag.');
+          const prefix = pattern.endsWith('*') ? pattern.slice(0, -1) : 'v';
+          const match = latest ? /(\d+)\.(\d+)\.(\d+)$/.exec(latest) : null;
+          const [major, minor, patch] = match ? [Number(match[1]), Number(match[2]), Number(match[3])] : [0, 0, 0];
+          const version = bump === 'major' ? `${major + 1}.0.0` : bump === 'minor' ? `${major}.${minor + 1}.0` : `${major}.${minor}.${patch + 1}`;
+          next = latest ? latest.replace(/\d+\.\d+\.\d+$/, version) : `${prefix}${version}`;
+        }
+        if (!/^[\w.+-]+(\/[\w.+-]+)*$/.test(next)) throw new UserError(`"${next}" isn't a valid tag name.`);
+        if (data.tags.some((entry) => entry.tag === next)) throw new UserError(`Tag ${next} already exists.`);
+        if (!matchesTagPattern(next, pattern)) throw new UserError(`${next} doesn't match the publish pattern "${pattern}", so kanbai publish wouldn't pick it up.`);
+        const head = state.snapshot.commit;
+        if (!confirm) {
+          return text(`Preview: tag ${next} on ${state.branch} at ${head.slice(0, 7)} (latest is ${latest ?? 'none'}). Creating it lets the next kanbai publish deploy it. Call again with confirm: true to create it.`);
+        }
+        await session.github.createTag(state.repo, next, head);
+        return text(`Created tag ${next} on ${state.branch} at ${head.slice(0, 7)}. Run /publish in Claude Code (or kanbai publish on your computer) to build and deploy it.`);
+      }),
+  );
+
+  server.registerTool(
     'publish_status',
     {
       description:
@@ -595,20 +637,14 @@ export function createServer(env: Env, props: Props): McpServer {
       guard(async () => {
         const state = await session.load(repo);
         const pattern = state.config.publish?.tags ?? 'v*';
-        const refs = await session.github.publishRefs(state.repo);
-        const markers = new Map<string, { lock?: Marker; done?: Marker; failed?: Marker }>();
-        for (const ref of refs.markers) {
-          const [kind, ...rest] = ref.name.split('/');
-          const tag = rest.join('/');
-          if (kind !== 'lock' && kind !== 'done' && kind !== 'failed') continue;
-          const marker = parseMarker(ref.message);
-          if (marker) markers.set(tag, { ...markers.get(tag), [kind]: marker });
-        }
-        const statuses = publishStatuses(refs.tags.filter((entry) => matchesTagPattern(entry.tag, pattern)), markers);
+        const branch = state.config.publish?.branch ?? DEFAULT_PUBLISH_BRANCH;
+        const data = await session.github.publishData(state.repo, branch);
+        const events = data.messages.map((message) => parseEvent(message.trim())).filter((event): event is PublishEvent => !!event);
+        const statuses = publishStatuses(data.tags.filter((entry) => matchesTagPattern(entry.tag, pattern)), events);
         if (!statuses.length) return text(`No tags match "${pattern}" in ${repoName(state)}.`);
         const lines = statuses.slice(0, 20).map((status) => {
           const marker = status.lock ?? status.done ?? status.failed;
-          const who = marker ? ` — ${marker.by} on ${marker.host}, ${marker.finished ?? marker.at}` : '';
+          const who = marker ? ` — ${marker.by} on ${marker.host}, ${marker.at}` : '';
           const log = status.state === 'failed' && status.failed?.log ? `\n  exit ${status.failed.exitCode}, last output:\n${status.failed.log.split('\n').slice(-10).map((line) => `    ${line}`).join('\n')}` : '';
           return `- ${status.tag} ${status.state}${who}${log}`;
         });

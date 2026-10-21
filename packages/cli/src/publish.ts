@@ -1,26 +1,20 @@
 /**
- * Git-based publishing: any client (your computer, a Claude Code container) can build and deploy a
- * version tag, and git decides who does it.
- *
- *   refs/kanbai/lock/<tag>     claimed: someone is building it right now
- *   refs/kanbai/done/<tag>     built and deployed
- *   refs/kanbai/failed/<tag>   the last attempt failed
- *
- * Each ref points at a tiny commit whose message is JSON (who, where, when, result).
- * Claiming is a push that creates the lock ref. The remote refuses to create a ref that already
- * exists, so when two clients claim the same tag at once, exactly one push succeeds. Taking over an
- * expired lock uses --force-with-lease, which only replaces the lock if it is still the old one.
+ * Git-based publishing: any client (your computer, a Claude Code container) can build and deploy
+ * a version tag, and git decides who does it. See packages/core/src/publish.ts for the model:
+ * one branch of event commits, written only with fast-forward pushes.
  */
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type Marker, type PublishConfig, type TagStatus, parseMarker, publishStatuses } from '@kanbai/core';
+import { type EventKind, type PublishConfig, type PublishEvent, type TagStatus, parseEvent, publishStatuses } from '@kanbai/core';
 
-export type { Marker, TagStatus } from '@kanbai/core';
+export type { PublishEvent, TagStatus } from '@kanbai/core';
 
-const NS = 'refs/kanbai';
-const EMPTY_TREE_INPUT = '';
+/** Where the remote branch is kept locally: a private ref, so it never shows up as a local branch. */
+const TRACKING = 'refs/kanbai/publish';
+const RECORD_SEP = '\u001e';
 
 export class Git {
   constructor(
@@ -41,10 +35,21 @@ export class Git {
     }
   }
 
-  /** Brings kanbai refs (pruning ones deleted on the remote) and tags up to date. Local tags are never pruned. */
-  sync(): void {
-    this.run(['fetch', '--quiet', '--prune', this.remote, `+${NS}/*:${NS}/*`]);
+  /** Fetches tags and the publish branch. Local tags are never pruned. Returns the branch head, if any. */
+  sync(branch: string): string | undefined {
     this.run(['fetch', '--quiet', '--tags', this.remote]);
+    const fetched = this.tryRun(['fetch', '--quiet', this.remote, `+refs/heads/${branch}:${TRACKING}`]);
+    if (!fetched.ok) {
+      // No such branch on the remote yet: forget any local copy.
+      this.tryRun(['update-ref', '-d', TRACKING]);
+      return undefined;
+    }
+    return this.head();
+  }
+
+  head(): string | undefined {
+    const result = this.tryRun(['rev-parse', '--verify', '--quiet', TRACKING]);
+    return result.ok ? result.out : undefined;
   }
 
   identity(): { by: string; host: string } {
@@ -54,25 +59,19 @@ export class Git {
     return { by, host: process.env.KANBAI_HOST || hostname() };
   }
 
-  /** A commit with an empty tree whose message is the marker, so it can live in any ref. */
-  markerCommit(marker: Marker): string {
-    const tree = this.run(['mktree'], EMPTY_TREE_INPUT);
-    return this.run(['-c', 'user.name=kanbai', '-c', 'user.email=kanbai@localhost', 'commit-tree', tree, '-m', JSON.stringify(marker)]);
+  /** Events on the publish branch, oldest first (up to the last 1000). */
+  events(): PublishEvent[] {
+    if (!this.head()) return [];
+    const out = this.run(['log', '--max-count=1000', '--reverse', `--format=%B${RECORD_SEP}`, TRACKING]);
+    return out
+      .split(RECORD_SEP)
+      .map((message) => parseEvent(message.trim()))
+      .filter((event): event is PublishEvent => !!event);
   }
 
-  readMarker(ref: string): Marker | undefined {
-    const message = this.tryRun(['log', '-1', '--format=%B', ref]);
-    return message.ok ? parseMarker(message.out) : undefined;
-  }
-
-  refSha(ref: string): string | undefined {
-    const result = this.tryRun(['rev-parse', '--verify', '--quiet', ref]);
-    return result.ok ? result.out : undefined;
-  }
-
-  /** Version tags matching the pattern, newest first, with the commit each points at. */
+  /** Version tags matching the pattern, with the commit each points at. */
   versionTags(pattern: string): { tag: string; commit: string }[] {
-    const out = this.run(['tag', '--list', pattern, '--sort=-v:refname', '--format=%(refname:short) %(*objectname)%(objectname)']);
+    const out = this.run(['tag', '--list', pattern, '--format=%(refname:short) %(*objectname)%(objectname)']);
     return out
       .split('\n')
       .filter(Boolean)
@@ -83,20 +82,24 @@ export class Git {
       });
   }
 
-  push(args: string[]): { ok: true } | { ok: false; err: string } {
-    const result = this.tryRun(['push', '--quiet', '--porcelain', this.remote, ...args]);
-    return result.ok ? { ok: true } : result;
+  /**
+   * Writes one event as a commit on top of `parent` and pushes it as a fast-forward.
+   * Returns false when the branch moved on the remote meanwhile (someone else wrote first).
+   */
+  append(branch: string, parent: string | undefined, event: PublishEvent): boolean {
+    const tree = this.run(['mktree'], '');
+    const args = ['-c', 'user.name=kanbai', '-c', 'user.email=kanbai@localhost', 'commit-tree', tree, '-m', JSON.stringify(event)];
+    if (parent) args.push('-p', parent);
+    const commit = this.run(args);
+    const pushed = this.tryRun(['push', '--quiet', '--porcelain', this.remote, `${commit}:refs/heads/${branch}`]);
+    if (!pushed.ok) return false;
+    this.run(['update-ref', TRACKING, commit]);
+    return true;
   }
 }
 
-const lockRef = (tag: string) => `${NS}/lock/${tag}`;
-const doneRef = (tag: string) => `${NS}/done/${tag}`;
-const failedRef = (tag: string) => `${NS}/failed/${tag}`;
-
 export function tagStatuses(git: Git, config: PublishConfig, now = new Date()): TagStatus[] {
-  const tags = git.versionTags(config.tags);
-  const markers = new Map(tags.map(({ tag }) => [tag, { lock: git.readMarker(lockRef(tag)), done: git.readMarker(doneRef(tag)), failed: git.readMarker(failedRef(tag)) }]));
-  return publishStatuses(tags, markers, now);
+  return publishStatuses(git.versionTags(config.tags), git.events(), now);
 }
 
 export interface PublishOptions {
@@ -106,7 +109,7 @@ export interface PublishOptions {
   /** Show what would happen without claiming. */
   dryRun?: boolean;
   log: (line: string) => void;
-  /** Heartbeat interval; defaults to a third of the lease. */
+  /** Renewal interval; defaults to a third of the lease. */
   heartbeatMs?: number;
 }
 
@@ -117,55 +120,83 @@ export type PublishResult =
   | { outcome: 'busy'; tag: string; by: string; host: string }
   | { outcome: 'dry-run'; tag: string };
 
-function tail(text: string, lines = 40): string {
-  return text.split('\n').slice(-lines).join('\n').slice(-4000);
+const tail = (text: string, lines = 40) => text.split('\n').slice(-lines).join('\n').slice(-4000);
+
+type Decision = { go: true; status: TagStatus } | { go: false; result: PublishResult };
+
+function decide(statuses: TagStatus[], config: PublishConfig, options: PublishOptions): Decision {
+  const status = options.tag ? statuses.find((entry) => entry.tag === options.tag) : statuses[0];
+  if (!status) {
+    return {
+      go: false,
+      result: {
+        outcome: 'nothing',
+        reason: options.tag ? `Tag ${options.tag} doesn't exist (or doesn't match "${config.tags}").` : `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.`,
+      },
+    };
+  }
+  if (status.state === 'done') return { go: false, result: { outcome: 'nothing', reason: `${status.tag} is already published (by ${status.done!.by} on ${status.done!.host}, ${status.done!.at}).` } };
+  if (status.state === 'building') return { go: false, result: { outcome: 'busy', tag: status.tag, by: status.lock!.by, host: status.lock!.host } };
+  if (status.state === 'failed' && !options.retry) {
+    return { go: false, result: { outcome: 'nothing', reason: `${status.tag} failed last time (exit ${status.failed!.exitCode}, on ${status.failed!.host}). Fix it with a new tag, or run again with --retry.` } };
+  }
+  return { go: true, status };
+}
+
+/** Writes an event, re-reading and retrying when another client wrote first. `check` may veto a retry. */
+function appendWithRetry(git: Git, config: PublishConfig, makeEvent: () => PublishEvent, check?: () => string | undefined): { ok: true } | { ok: false; reason: string } {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const head = attempt === 0 ? git.head() : git.sync(config.branch);
+    const veto = attempt === 0 ? undefined : check?.();
+    if (veto) return { ok: false, reason: veto };
+    if (git.append(config.branch, head, makeEvent())) return { ok: true };
+  }
+  return { ok: false, reason: 'The publish branch kept changing; try again.' };
 }
 
 /** Picks the tag, claims it, runs the command in a clean checkout, and records the outcome. */
 export async function publish(git: Git, config: PublishConfig, options: PublishOptions): Promise<PublishResult> {
-  git.sync();
-  const statuses = tagStatuses(git, config);
-  let target: TagStatus | undefined;
-  if (options.tag) {
-    target = statuses.find((status) => status.tag === options.tag);
-    if (!target) return { outcome: 'nothing', reason: `Tag ${options.tag} doesn't exist (or doesn't match "${config.tags}").` };
-  } else {
-    target = statuses[0];
-    if (!target) return { outcome: 'nothing', reason: `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.` };
-  }
-  if (target.state === 'done') return { outcome: 'nothing', reason: `${target.tag} is already published (by ${target.done!.by} on ${target.done!.host}, ${target.done!.finished}).` };
-  if (target.state === 'building') return { outcome: 'busy', tag: target.tag, by: target.lock!.by, host: target.lock!.host };
-  if (target.state === 'failed' && !options.retry) {
-    return { outcome: 'nothing', reason: `${target.tag} failed last time (exit ${target.failed!.exitCode}, ${target.failed!.host}). Fix it with a new tag, or run again with --retry.` };
-  }
-  if (options.dryRun) return { outcome: 'dry-run', tag: target.tag };
+  git.sync(config.branch);
+  const first = decide(tagStatuses(git, config), config, options);
+  if (!first.go) return first.result;
+  if (options.dryRun) return { outcome: 'dry-run', tag: first.status.tag };
 
-  const { tag, commit } = target;
+  const { tag, commit } = first.status;
   const me = git.identity();
+  const claim = randomUUID();
   const leaseMs = config.leaseMinutes * 60_000;
   const started = new Date();
-  const lockMarker = (): Marker => ({ tag, commit, ...me, at: started.toISOString(), expires: new Date(Date.now() + leaseMs).toISOString() });
+  const event = (kind: EventKind, extra: Partial<PublishEvent> = {}): PublishEvent => ({
+    kind,
+    tag,
+    commit,
+    claim,
+    ...me,
+    at: new Date().toISOString(),
+    ...(kind === 'claim' || kind === 'renew' ? { expires: new Date(Date.now() + leaseMs).toISOString() } : {}),
+    ...extra,
+  });
+  const tookOver = first.status.state === 'stale';
 
-  // Claim: create the lock ref, or replace a stale one only if it is still the same stale one.
-  let lockSha = git.markerCommit(lockMarker());
-  const staleSha = target.state === 'stale' ? git.refSha(lockRef(tag)) : undefined;
-  const claim = staleSha
-    ? git.push([`--force-with-lease=${lockRef(tag)}:${staleSha}`, `${lockSha}:${lockRef(tag)}`])
-    : git.push([`${lockSha}:${lockRef(tag)}`]);
-  if (!claim.ok) {
-    git.sync();
-    const lock = git.readMarker(lockRef(tag));
-    return { outcome: 'busy', tag, by: lock?.by ?? 'someone', host: lock?.host ?? 'another client' };
-  }
-  options.log(`Claimed ${tag} (${commit.slice(0, 7)}) as ${me.by} on ${me.host}.${staleSha ? ' Took over an expired claim.' : ''}`);
+  // Claim. When another write lands first, look again: maybe that write was someone claiming this tag.
+  let busy: PublishResult | undefined;
+  const claimed = appendWithRetry(git, config, () => event('claim'), () => {
+    const again = decide(tagStatuses(git, config), config, { ...options, tag });
+    if (!again.go) {
+      busy = again.result;
+      return 'taken';
+    }
+    return undefined;
+  });
+  if (!claimed.ok) return busy ?? { outcome: 'nothing', reason: claimed.reason };
+  options.log(`Claimed ${tag} (${commit.slice(0, 7)}) as ${me.by} on ${me.host}.${tookOver ? ' Took over an expired claim.' : ''}`);
 
-  // Heartbeat: extend the claim while the build runs.
+  // Renew the claim while the build runs.
+  const stillMine = () => (tagStatuses(git, config).find((status) => status.tag === tag)?.lock?.claim === claim ? undefined : 'Lost the claim.');
   let lost = false;
   const heartbeat = setInterval(() => {
-    const next = git.markerCommit(lockMarker());
-    const result = git.push([`--force-with-lease=${lockRef(tag)}:${lockSha}`, `${next}:${lockRef(tag)}`]);
-    if (result.ok) lockSha = next;
-    else lost = true;
+    const renewed = appendWithRetry(git, config, () => event('renew'), stillMine);
+    if (!renewed.ok) lost = true;
   }, options.heartbeatMs ?? Math.max(1000, leaseMs / 3));
 
   // Build in a separate, clean checkout, so the working copy (and other agents in it) stay untouched.
@@ -201,26 +232,20 @@ export async function publish(git: Git, config: PublishConfig, options: PublishO
     rmSync(dir, { recursive: true, force: true });
   }
 
-  const finished = new Date();
-  const durationMs = finished.getTime() - started.getTime();
-  const result: Marker = { tag, commit, ...me, at: started.toISOString(), finished: finished.toISOString(), durationMs, exitCode, log: tail(output) };
-  const markerSha = git.markerCommit(result);
-  const outcomeRef = exitCode === 0 ? doneRef(tag) : failedRef(tag);
-  // One atomic push: record the outcome and release the lock together (only if the lock is still ours).
-  const release = git.push(['--atomic', `--force-with-lease=${lockRef(tag)}:${lockSha}`, `+${markerSha}:${outcomeRef}`, `:${lockRef(tag)}`]);
-  if (!release.ok) {
-    options.log(`Warning: couldn't record the outcome cleanly${lost ? ' (the claim was lost during the build)' : ''}: ${release.err}`);
-    git.push([`+${markerSha}:${outcomeRef}`]);
-  }
-  if (exitCode === 0) git.tryRun(['push', '--quiet', git.remote, '--delete', failedRef(tag)]);
-  git.sync();
+  const durationMs = Date.now() - started.getTime();
+  const outcome = event(exitCode === 0 ? 'done' : 'failed', { started: started.toISOString(), durationMs, exitCode, log: tail(output) });
+  // The outcome is recorded even if the claim was lost meanwhile: it describes what this client deployed.
+  const recorded = appendWithRetry(git, config, () => ({ ...outcome, at: new Date().toISOString() }));
+  if (lost) options.log('Warning: the claim expired during the build, so another client may have started too.');
+  if (!recorded.ok) options.log(`Warning: couldn't record the outcome: ${recorded.reason}`);
   return exitCode === 0 ? { outcome: 'done', tag, durationMs } : { outcome: 'failed', tag, exitCode };
 }
 
-/** Removes a claim by hand, e.g. after killing a build. */
-export function releaseLock(git: Git, tag: string): boolean {
-  git.sync();
-  const sha = git.refSha(lockRef(tag));
-  if (!sha) return false;
-  return git.push([`--force-with-lease=${lockRef(tag)}:${sha}`, `:${lockRef(tag)}`]).ok;
+/** Drops a claim by hand, e.g. after killing a build. */
+export function releaseLock(git: Git, config: PublishConfig, tag: string): boolean {
+  git.sync(config.branch);
+  const lock = tagStatuses(git, config).find((status) => status.tag === tag)?.lock;
+  if (!lock) return false;
+  const me = git.identity();
+  return appendWithRetry(git, config, () => ({ kind: 'release', tag, commit: lock.commit, claim: lock.claim, ...me, at: new Date().toISOString() })).ok;
 }

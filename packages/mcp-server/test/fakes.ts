@@ -7,7 +7,9 @@ export class FakeGitHub {
   head = 'c0';
   commits: { oid: string; headline: string; paths: string[] }[] = [];
   tags: string[] = [];
-  markers: { name: string; message: string }[] = [];
+  createdTags: { ref: string; sha: string }[] = [];
+  /** Publish branch event messages, oldest first. */
+  events: string[] = [];
   private counter = 0;
 
   constructor(files: Record<string, string> = {}) {
@@ -51,6 +53,12 @@ export class FakeGitHub {
       const path = decodeURIComponent(url.pathname.slice('/repos/lamartio/test/contents/'.length));
       return path in this.files ? new Response(this.files[path]) : json({ message: 'Not Found' }, 404);
     }
+    if (url.pathname === '/repos/lamartio/test/git/refs' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as { ref: string; sha: string };
+      this.tags.push(body.ref.replace('refs/tags/', ''));
+      this.createdTags.push(body);
+      return json({ ref: body.ref }, 201);
+    }
     if (url.pathname !== '/graphql') return json({ message: 'Not Found' }, 404);
 
     const { query, variables } = JSON.parse(String(init?.body)) as { query: string; variables: Record<string, any> };
@@ -65,12 +73,12 @@ export class FakeGitHub {
       this.commits.push({ oid: this.head, headline: input.message.headline, paths: [...input.fileChanges.additions, ...input.fileChanges.deletions].map((change: { path: string }) => change.path) });
       return json({ data: { createCommitOnBranch: { commit: { oid: this.head, url: `https://github.com/lamartio/test/commit/${this.head}` } } } });
     }
-    if (query.includes('refPrefix: "refs/kanbai/"')) {
+    if (query.includes('refPrefix: "refs/tags/"')) {
       return json({
         data: {
           repository: {
             tags: { nodes: this.tags.map((tag) => ({ name: tag, target: { oid: `c-${tag}` } })) },
-            kanbai: { nodes: this.markers.map((marker) => ({ name: marker.name, target: { oid: 'm', message: marker.message } })) },
+            branch: this.events.length ? { target: { history: { nodes: [...this.events].reverse().map((message) => ({ message })) } } } : null,
           },
         },
       });
