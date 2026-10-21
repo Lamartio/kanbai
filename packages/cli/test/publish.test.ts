@@ -23,7 +23,7 @@ function clone(name: string): Git {
   return new Git(dir);
 }
 
-const config = (command: string, leaseMinutes = 30): PublishConfig => ({ command, tags: 'v*', leaseMinutes, branch: 'kanbai/publish' });
+const config = (command: string, leaseMinutes = 30, requires: string[] = []): PublishConfig => ({ command, tags: 'v*', leaseMinutes, branch: 'kanbai/publish', requires });
 const BRANCH = 'kanbai/publish';
 
 beforeEach(() => {
@@ -114,6 +114,28 @@ describe('git-based publish', () => {
     expect(kinds.at(-1)).toBe('done');
   });
 
+  it('needs a version once the newest tag is published, and then redeploys it', async () => {
+    expect(await publish(a, config('true'), { log: quiet })).toMatchObject({ outcome: 'done' });
+    const plain = await publish(b, config('true'), { log: quiet });
+    expect(plain).toMatchObject({ outcome: 'nothing' });
+    expect(plain.outcome === 'nothing' && plain.reason).toContain('name it');
+    expect(await publish(b, config('true'), { log: quiet, tag: 'v0.1.0' })).toMatchObject({ outcome: 'done', tag: 'v0.1.0' });
+  });
+
+  it('refuses a named version while someone builds it', async () => {
+    a.sync(BRANCH);
+    a.append(BRANCH, a.head(), { kind: 'claim', tag: 'v0.1.0', commit: 'x', claim: 'k', by: 'alice', host: 'laptop', at: new Date().toISOString(), expires: new Date(Date.now() + 600_000).toISOString() });
+    expect(await publish(b, config('true'), { log: quiet })).toMatchObject({ outcome: 'busy' });
+    expect(await publish(b, config('true'), { log: quiet, tag: 'v0.1.0' })).toMatchObject({ outcome: 'busy' });
+  });
+
+  it('checks required secrets before claiming anything', async () => {
+    const result = await publish(a, config('true', 30, ['KANBAI_TEST_SURELY_UNSET']), { log: quiet });
+    expect(result.outcome === 'nothing' && result.reason).toContain('KANBAI_TEST_SURELY_UNSET');
+    a.sync(BRANCH);
+    expect(a.events()).toEqual([]);
+  });
+
   it('only builds the newest tag; older open tags are superseded', async () => {
     writeFileSync(join(a.cwd, 'app.txt'), 'v2\n');
     git(a.cwd, 'commit', '--quiet', '-am', 'second');
@@ -126,6 +148,9 @@ describe('git-based publish', () => {
       ['v0.2.0', 'done'],
       ['v0.1.0', 'superseded'],
     ]);
+    // Rolling back means naming the older version.
+    expect(await publish(b, config(`cat app.txt > "${out}"`), { log: quiet, tag: 'v0.1.0' })).toMatchObject({ outcome: 'done', tag: 'v0.1.0' });
+    expect(readFileSync(out, 'utf8')).toBe('v1\n');
     expect(existsSync(join(b.cwd, '.git'))).toBe(true);
   });
 });

@@ -124,21 +124,33 @@ const tail = (text: string, lines = 40) => text.split('\n').slice(-lines).join('
 
 type Decision = { go: true; status: TagStatus } | { go: false; result: PublishResult };
 
-function decide(statuses: TagStatus[], config: PublishConfig, options: PublishOptions): Decision {
-  const status = options.tag ? statuses.find((entry) => entry.tag === options.tag) : statuses[0];
+/**
+ * Which tag to build:
+ * - No tag given: the newest tag, and only while nobody has claimed or published it. When it is
+ *   claimed or already published, name a version explicitly. A failed newest tag needs --retry.
+ * - A tag given: that tag in any state (redeploy, rollback, retry), unless someone is building it.
+ */
+function decide(statuses: TagStatus[], config: PublishConfig, tag: string | undefined, retry: boolean | undefined): Decision {
+  const status = tag ? statuses.find((entry) => entry.tag === tag) : statuses[0];
   if (!status) {
     return {
       go: false,
       result: {
         outcome: 'nothing',
-        reason: options.tag ? `Tag ${options.tag} doesn't exist (or doesn't match "${config.tags}").` : `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.`,
+        reason: tag ? `Tag ${tag} doesn't exist (or doesn't match "${config.tags}").` : `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.`,
       },
     };
   }
-  if (status.state === 'done') return { go: false, result: { outcome: 'nothing', reason: `${status.tag} is already published (by ${status.done!.by} on ${status.done!.host}, ${status.done!.at}).` } };
   if (status.state === 'building') return { go: false, result: { outcome: 'busy', tag: status.tag, by: status.lock!.by, host: status.lock!.host } };
-  if (status.state === 'failed' && !options.retry) {
-    return { go: false, result: { outcome: 'nothing', reason: `${status.tag} failed last time (exit ${status.failed!.exitCode}, on ${status.failed!.host}). Fix it with a new tag, or run again with --retry.` } };
+  if (tag) return { go: true, status };
+  if (status.state === 'done') {
+    return {
+      go: false,
+      result: { outcome: 'nothing', reason: `The newest tag, ${status.tag}, is already published (by ${status.done!.by} on ${status.done!.host}, ${status.done!.at}). To deploy a version anyway, name it: publish <tag>.` },
+    };
+  }
+  if (status.state === 'failed' && !retry) {
+    return { go: false, result: { outcome: 'nothing', reason: `The newest tag, ${status.tag}, failed last time (exit ${status.failed!.exitCode}, on ${status.failed!.host}). Fix it with a new tag, or run again with --retry.` } };
   }
   return { go: true, status };
 }
@@ -157,7 +169,9 @@ function appendWithRetry(git: Git, config: PublishConfig, makeEvent: () => Publi
 /** Picks the tag, claims it, runs the command in a clean checkout, and records the outcome. */
 export async function publish(git: Git, config: PublishConfig, options: PublishOptions): Promise<PublishResult> {
   git.sync(config.branch);
-  const first = decide(tagStatuses(git, config), config, options);
+  const missing = config.requires.filter((name) => !process.env[name]);
+  if (missing.length) return { outcome: 'nothing', reason: `This client can't deploy: missing environment variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')}. Nothing was claimed.` };
+  const first = decide(tagStatuses(git, config), config, options.tag, options.retry);
   if (!first.go) return first.result;
   if (options.dryRun) return { outcome: 'dry-run', tag: first.status.tag };
 
@@ -181,7 +195,12 @@ export async function publish(git: Git, config: PublishConfig, options: PublishO
   // Claim. When another write lands first, look again: maybe that write was someone claiming this tag.
   let busy: PublishResult | undefined;
   const claimed = appendWithRetry(git, config, () => event('claim'), () => {
-    const again = decide(tagStatuses(git, config), config, { ...options, tag });
+    // Someone wrote first. If they claimed this tag, stop; if they published it, stop too unless a version was named.
+    const again = decide(tagStatuses(git, config), config, options.tag, options.retry);
+    if (again.go && again.status.tag !== tag) {
+      busy = { outcome: 'nothing', reason: `A newer tag, ${again.status.tag}, appeared while claiming ${tag}. Run publish again.` };
+      return 'changed';
+    }
     if (!again.go) {
       busy = again.result;
       return 'taken';

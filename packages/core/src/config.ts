@@ -23,6 +23,8 @@ export interface PublishConfig {
   leaseMinutes: number;
   /** Branch that holds the publish events (claims, outcomes). Default: kanbai/publish. */
   branch: string;
+  /** Environment variables the command needs (deploy secrets). Checked before claiming. */
+  requires: string[];
 }
 
 export const CONFIG_PATH = '.board.json';
@@ -101,7 +103,11 @@ export function resolveConfig(raw: string | undefined, existingDirs: Iterable<st
     if (typeof leaseMinutes !== 'number' || !(leaseMinutes > 0)) return { ok: false, error: '"publish.leaseMinutes" must be a positive number.' };
     const branch = publish.branch ?? 'kanbai/publish';
     if (typeof branch !== 'string' || !/^[\w.-]+(\/[\w.-]+)*$/.test(branch)) return { ok: false, error: '"publish.branch" must be a branch name.' };
-    config.publish = { command: publish.command, tags, leaseMinutes, branch };
+    const requires = publish.requires ?? [];
+    if (!Array.isArray(requires) || !requires.every((name) => typeof name === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+      return { ok: false, error: '"publish.requires" must be a list of environment variable names.' };
+    }
+    config.publish = { command: publish.command, tags, leaseMinutes, branch, requires: requires as string[] };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== 'string') return { ok: false, error: '"archive" must be a lane name.' };

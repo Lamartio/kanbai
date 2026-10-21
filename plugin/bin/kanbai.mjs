@@ -7021,7 +7021,11 @@ function resolveConfig(raw, existingDirs = []) {
     const branch = publish.branch ?? "kanbai/publish";
     if (typeof branch !== "string" || !/^[\w.-]+(\/[\w.-]+)*$/.test(branch))
       return { ok: false, error: '"publish.branch" must be a branch name.' };
-    config.publish = { command: publish.command, tags, leaseMinutes, branch };
+    const requires = publish.requires ?? [];
+    if (!Array.isArray(requires) || !requires.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+      return { ok: false, error: '"publish.requires" must be a list of environment variable names.' };
+    }
+    config.publish = { command: publish.command, tags, leaseMinutes, branch, requires };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== "string")
@@ -7978,15 +7982,15 @@ function publishStatuses(tags, events, now = new Date) {
   return sorted.map(({ tag, commit }, index) => {
     const { lock, done, failed } = replayed.get(tag) ?? {};
     let state;
-    if (done)
-      state = "done";
-    else if (lock)
+    if (lock)
       state = lock.expires && new Date(lock.expires) < now ? "stale" : "building";
+    else if (done)
+      state = "done";
     else if (failed)
       state = "failed";
     else
       state = index === 0 ? "pending" : "superseded";
-    return { tag, commit, state, lock: done ? undefined : lock, done, failed };
+    return { tag, commit, state, lock, done, failed };
   });
 }
 // src/publish.ts
@@ -8068,23 +8072,29 @@ function tagStatuses(git, config, now = new Date) {
 var tail = (text, lines = 40) => text.split(`
 `).slice(-lines).join(`
 `).slice(-4000);
-function decide(statuses, config, options) {
-  const status = options.tag ? statuses.find((entry) => entry.tag === options.tag) : statuses[0];
+function decide(statuses, config, tag, retry) {
+  const status = tag ? statuses.find((entry) => entry.tag === tag) : statuses[0];
   if (!status) {
     return {
       go: false,
       result: {
         outcome: "nothing",
-        reason: options.tag ? `Tag ${options.tag} doesn't exist (or doesn't match "${config.tags}").` : `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.`
+        reason: tag ? `Tag ${tag} doesn't exist (or doesn't match "${config.tags}").` : `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.`
       }
     };
   }
-  if (status.state === "done")
-    return { go: false, result: { outcome: "nothing", reason: `${status.tag} is already published (by ${status.done.by} on ${status.done.host}, ${status.done.at}).` } };
   if (status.state === "building")
     return { go: false, result: { outcome: "busy", tag: status.tag, by: status.lock.by, host: status.lock.host } };
-  if (status.state === "failed" && !options.retry) {
-    return { go: false, result: { outcome: "nothing", reason: `${status.tag} failed last time (exit ${status.failed.exitCode}, on ${status.failed.host}). Fix it with a new tag, or run again with --retry.` } };
+  if (tag)
+    return { go: true, status };
+  if (status.state === "done") {
+    return {
+      go: false,
+      result: { outcome: "nothing", reason: `The newest tag, ${status.tag}, is already published (by ${status.done.by} on ${status.done.host}, ${status.done.at}). To deploy a version anyway, name it: publish <tag>.` }
+    };
+  }
+  if (status.state === "failed" && !retry) {
+    return { go: false, result: { outcome: "nothing", reason: `The newest tag, ${status.tag}, failed last time (exit ${status.failed.exitCode}, on ${status.failed.host}). Fix it with a new tag, or run again with --retry.` } };
   }
   return { go: true, status };
 }
@@ -8101,7 +8111,10 @@ function appendWithRetry(git, config, makeEvent, check) {
 }
 async function publish2(git, config, options) {
   git.sync(config.branch);
-  const first = decide(tagStatuses(git, config), config, options);
+  const missing = config.requires.filter((name) => !process.env[name]);
+  if (missing.length)
+    return { outcome: "nothing", reason: `This client can't deploy: missing environment variable${missing.length > 1 ? "s" : ""} ${missing.join(", ")}. Nothing was claimed.` };
+  const first = decide(tagStatuses(git, config), config, options.tag, options.retry);
   if (!first.go)
     return first.result;
   if (options.dryRun)
@@ -8124,7 +8137,11 @@ async function publish2(git, config, options) {
   const tookOver = first.status.state === "stale";
   let busy;
   const claimed = appendWithRetry(git, config, () => event("claim"), () => {
-    const again = decide(tagStatuses(git, config), config, { ...options, tag });
+    const again = decide(tagStatuses(git, config), config, options.tag, options.retry);
+    if (again.go && again.status.tag !== tag) {
+      busy = { outcome: "nothing", reason: `A newer tag, ${again.status.tag}, appeared while claiming ${tag}. Run publish again.` };
+      return "changed";
+    }
     if (!again.go) {
       busy = again.result;
       return "taken";
@@ -8277,7 +8294,8 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
-  kanbai publish [tag] [--retry] [--dry-run]   build and deploy the newest version tag here; git decides who builds
+  kanbai publish [--retry] [--dry-run]         build and deploy the newest tag here, if nobody claimed or published it
+  kanbai publish <tag>                         build that version anyway (redeploy, rollback), unless someone is building it
   kanbai publish --list                        pending, building, done or failed, per tag
   kanbai publish <tag> --release               drop a claim by hand (after killing a build)
   kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along

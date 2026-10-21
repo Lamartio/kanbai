@@ -124,8 +124,29 @@ Every write is one commit on the default branch. If someone pushed in between, t
 Build and deploy on your own machine or in a Claude Code container. Git decides who builds a tag, so two clients never deploy the same release.
 
 ```json
-{ "publish": { "command": "npm ci && npm run deploy", "tags": "v*", "leaseMinutes": 30, "branch": "kanbai/publish" } }
+{
+  "publish": {
+    "command": "./scripts/deploy.sh",
+    "requires": ["CLOUDFLARE_API_TOKEN"],
+    "tags": "v*",
+    "leaseMinutes": 30,
+    "branch": "kanbai/publish"
+  }
+}
 ```
+
+| Setting | Meaning | Default |
+| --- | --- | --- |
+| `command` | Shell command that builds and deploys, run in a clean checkout of the tag. A script in the repo (`./scripts/deploy.sh`) or a package script (`npm ci && npm run deploy`). Gets `KANBAI_TAG` and `KANBAI_COMMIT`. | required |
+| `requires` | Environment variables the command needs, usually deploy secrets. Checked before claiming, so a client without them refuses instead of failing halfway. | none |
+| `tags` | Which tags count as versions. | `v*` |
+| `leaseMinutes` | How long a claim lasts without renewal before another client may take over. | 30 |
+| `branch` | Branch that holds the publish events. | `kanbai/publish` |
+
+Which tag gets built:
+
+- `publish` with no version builds the **newest** tag, but only while nobody has claimed or published it. When the newest tag is being built, it refuses; when it is already published, it asks for a version. A failed newest tag needs `--retry`.
+- `publish <tag>` builds that version in any state: a redeploy, a rollback to an older tag, or a retry. Only a tag someone is building right now is refused.
 
 ```sh
 node plugin/bin/kanbai.mjs publish          # or /publish in Claude Code
@@ -138,7 +159,7 @@ How it works:
 
 1. Everything is recorded on one branch, `kanbai/publish`. Each commit on it is one event (a claim, a renewal, done, failed, a manual release), with an empty tree and a JSON message. `git log kanbai/publish` is the deploy history.
 2. Every write is a normal **fast-forward push** of one new commit. When two clients write at the same moment, the remote accepts one and rejects the other: that is the lock. Nothing is force-pushed or deleted, so it also works through restrictive git proxies such as Claude Code's cloud containers.
-3. `publish` takes the newest tag matching `publish.tags` that isn't done yet (older open tags are *superseded*), **claims** it, and runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree) with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
+3. `publish` picks the tag (see above), **claims** it, and runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree) with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
 4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
 5. It records *done* or *failed* (who, where, when, exit code, end of the log). A failed tag waits for `--retry` or a new tag. `publish <tag> --release` drops a claim by hand.
 

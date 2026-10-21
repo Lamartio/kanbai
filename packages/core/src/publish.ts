@@ -117,11 +117,12 @@ export function publishStatuses(tags: { tag: string; commit: string }[], events:
   const sorted = [...tags].sort((a, b) => compareVersionsDesc(a.tag, b.tag));
   return sorted.map(({ tag, commit }, index) => {
     const { lock, done, failed } = replayed.get(tag) ?? {};
+    // A claim comes first: a done tag can be claimed again to redeploy it.
     let state: TagState;
-    if (done) state = 'done';
-    else if (lock) state = lock.expires && new Date(lock.expires) < now ? 'stale' : 'building';
+    if (lock) state = lock.expires && new Date(lock.expires) < now ? 'stale' : 'building';
+    else if (done) state = 'done';
     else if (failed) state = 'failed';
     else state = index === 0 ? 'pending' : 'superseded';
-    return { tag, commit, state, lock: done ? undefined : lock, done, failed };
+    return { tag, commit, state, lock, done, failed };
   });
 }

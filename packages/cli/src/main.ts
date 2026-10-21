@@ -45,7 +45,8 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
-  kanbai publish [tag] [--retry] [--dry-run]   build and deploy the newest version tag here; git decides who builds
+  kanbai publish [--retry] [--dry-run]         build and deploy the newest tag here, if nobody claimed or published it
+  kanbai publish <tag>                         build that version anyway (redeploy, rollback), unless someone is building it
   kanbai publish --list                        pending, building, done or failed, per tag
   kanbai publish <tag> --release               drop a claim by hand (after killing a build)
   kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along
