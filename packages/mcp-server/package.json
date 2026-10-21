@@ -1,0 +1,24 @@
+{
+  "name": "@kanbai/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'no unit tests here; see packages/core'"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.3",
+    "@kanbai/core": "workspace:*",
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "^0.29.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "typescript": "^5",
+    "wrangler": "^4.151.3"
+  }
+}
