@@ -41,11 +41,13 @@ The output lists what is still missing (Done when, Context). Ask the user, then 
 ```sh
 node <cli> update 013 --done-when "- [ ] Toggling dark mode switches the theme without a reload
 - [ ] The choice survives a restart"
-node <cli> move 013 ready
+node <cli> move 013 DOING --actor <github login>
 ```
 
-**Start work.** `context <id>` prints the issue, parent, sub-issues, linked issues, mentions and the files named in its Context. Read those files, then `move <id> doing --actor <github login>`.
+**Start work.** `context <id>` prints the issue, parent, sub-issues, linked issues, mentions and the files named in its Context. Read those files, then move it to the working lane (`DOING` by default) with `--actor <github login>`.
 
-**Finish.** Move to `review`, then `done`. Moving back needs `--reason`.
+**Finish.** Move it on to `DONE` (or the repo's own lanes: `node <cli> lanes` lists them). Moving back needs `--reason`.
+
+**Change the columns.** `lanes A B C --rename OLD=NEW` rewrites `.board.json` and moves issues along. Only do this when the user asks.
 
 **Check the board.** `doctor` reports problems; `doctor --fix` applies the safe fixes (board files, unknown lanes, missing titles). Leave renumbering to the MCP doctor.

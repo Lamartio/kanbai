@@ -17,9 +17,9 @@ export const CONFIG_PATH = '.board.json';
 export const DEFAULT_CONFIG: BoardConfig = {
   docs: 'docs',
   board: 'docs/board',
-  lanes: ['idea', 'ready', 'doing', 'review', 'done', 'archived'],
+  lanes: ['TODO', 'DOING', 'DONE', 'ARCHIVED'],
   attachments: 'lfs',
-  archive: 'archived',
+  archive: 'ARCHIVED',
 };
 
 /** Folders tried, in order, when a repo has no `.board.json`. */
@@ -81,8 +81,14 @@ export function resolveConfig(raw: string | undefined, existingDirs: Iterable<st
   if (value.archive !== undefined) {
     if (typeof value.archive !== 'string') return { ok: false, error: '"archive" must be a lane name.' };
     config.archive = value.archive;
-  } else if (value.lanes !== undefined && !config.lanes.includes(config.archive)) {
-    config.lanes = [...config.lanes, config.archive];
+  } else if (value.lanes !== undefined) {
+    // No archive named: reuse an "archived" lane in any case, or add one in the style of the others.
+    const existing = config.lanes.find((lane) => lane.toLowerCase() === 'archived');
+    if (existing) config.archive = existing;
+    else {
+      config.archive = config.lanes.every((lane) => lane === lane.toLowerCase()) ? 'archived' : 'ARCHIVED';
+      config.lanes = [...config.lanes, config.archive];
+    }
   }
   if (config.lanes[config.lanes.length - 1] !== config.archive) {
     return { ok: false, error: `The archive lane "${config.archive}" must be the last lane.` };

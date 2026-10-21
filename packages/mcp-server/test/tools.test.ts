@@ -34,8 +34,8 @@ describe('tools against a fake GitHub', () => {
   it('sets up a board, files issues and moves them, one commit each', async () => {
     const init = await call('init_board');
     expect(init.isError).toBeFalsy();
-    expect(github.files['.board.json']).toContain('"archived"');
-    expect(github.files['docs/board/000_board.md']).toContain('## Idea');
+    expect(github.files['.board.json']).toContain('"ARCHIVED"');
+    expect(github.files['docs/board/000_board.md']).toContain('## TODO');
 
     const created = await call('create_issue', { title: 'Build login', why: 'Users need accounts.' });
     expect(created.text).toContain('Created 001 "Build login"');
@@ -43,19 +43,19 @@ describe('tools against a fake GitHub', () => {
     expect(github.files['docs/board/001_build-login.md']).toContain('title: Build login');
     expect(github.files['docs/board/000_board.md']).toContain('- [001 Build login](./001_build-login.md)');
 
-    const blocked = await call('move_issue', { id: '001', lane: 'ready' });
+    const blocked = await call('move_issue', { id: '001', lane: 'DOING' });
     expect(blocked.isError).toBe(true);
     expect(blocked.text).toContain('Done when is empty');
 
     await call('update_issue', { id: '1', sections: { done_when: '- [ ] Signing in with GitHub works' } });
-    const moved = await call('move_issue', { id: '001', lane: 'ready' });
+    const moved = await call('move_issue', { id: '001', lane: 'DOING' });
     expect(moved.isError).toBeFalsy();
-    expect(github.files['docs/board/001_build-login.md']).toContain('status: ready');
+    expect(github.files['docs/board/001_build-login.md']).toContain('status: DOING');
     expect(github.commits.map((commit) => commit.headline)).toEqual([
       'kanbai: set up the board',
       'kanbai: create 001 Build login',
       'kanbai: update 001 Build login',
-      'kanbai: move 001 to ready',
+      'kanbai: move 001 to DOING',
     ]);
   });
 
@@ -63,7 +63,7 @@ describe('tools against a fake GitHub', () => {
     await call('init_board');
     await call('create_issue', { title: 'A', why: 'x' });
     // Someone pushes 005 by hand on the main board.
-    github.push({ 'docs/board/005_manual.md': '---\ntitle: Manual\ntype: feature\nstatus: idea\ncreated: 2026-10-21\n---\n\n## Why\n\nx\n' });
+    github.push({ 'docs/board/005_manual.md': '---\ntitle: Manual\ntype: feature\nstatus: TODO\ncreated: 2026-10-21\n---\n\n## Why\n\nx\n' });
     const next = await call('create_issue', { title: 'B', why: 'y' });
     expect(next.text).toContain('Created 006');
     const other = await call('create_issue', { title: 'Create home', why: 'z', board: 'ANT-TEST' });
@@ -116,14 +116,14 @@ describe('tools against a fake GitHub', () => {
     await call('init_board');
     await call('create_issue', { title: 'Old idea', why: 'x' });
     await call('archive_issue', { id: '001', reason: 'No longer needed' });
-    expect(github.files['docs/board/001_old-idea.md']).toContain('status: archived');
+    expect(github.files['docs/board/001_old-idea.md']).toContain('status: ARCHIVED');
     expect((await call('search_issues', { text: 'old' })).text).toBe('No issues match.');
     expect((await call('search_issues', { text: 'old', include_archived: true })).text).toContain('001');
   });
 
   it('runs the doctor: reports, then fixes', async () => {
     github.push({
-      'docs/board/001_a.md': '---\ntitle: A\ntype: feature\nstatus: idea\ncreated: 2026-01-01\n---\n\n## Why\n\nx\n',
+      'docs/board/001_a.md': '---\ntitle: A\ntype: feature\nstatus: TODO\ncreated: 2026-01-01\n---\n\n## Why\n\nx\n',
       'docs/board/001_b.md': '---\ntitle: B\ntype: feature\nstatus: wip\ncreated: 2026-02-01\n---\n\n## Why\n\ny\n',
     });
     const report = await call('doctor');
@@ -132,10 +132,19 @@ describe('tools against a fake GitHub', () => {
     expect(github.commits).toHaveLength(0);
     await call('doctor', { apply: 'all' });
     expect(github.files['docs/board/001_b.md']).toBeUndefined();
-    expect(github.files['docs/board/002_b.md']).toContain('status: idea');
+    expect(github.files['docs/board/002_b.md']).toContain('status: TODO');
     expect(github.files['docs/board/000_board.md']).toContain('002 B');
     expect(github.files['.board.json']).toBeDefined();
     expect((await call('doctor')).text).toContain('healthy');
+  });
+
+  it('changes the lanes and moves issues along', async () => {
+    await call('init_board');
+    await call('create_issue', { title: 'A', why: 'x' });
+    const result = await call('set_lanes', { lanes: ['BACKLOG', 'DOING', 'REVIEW', 'DONE'], rename: { TODO: 'BACKLOG' } });
+    expect(result.text).toContain('BACKLOG → DOING → REVIEW → DONE → ARCHIVED');
+    expect(github.files['docs/board/001_a.md']).toContain('status: BACKLOG');
+    expect(github.files['docs/board/000_board.md']).toContain('## REVIEW');
   });
 
   it('explains a missing repo instead of crashing', async () => {

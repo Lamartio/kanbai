@@ -22,12 +22,25 @@ docs/board/
 
 - Board names are kebab-case and case-sensitive. Numbers count per board.
 - Issues have frontmatter (`title`, `type`, `status`, `assignee`, `created`, `tags`, `links`, `attachments`, `released`) and sections: *Why*, *Done when*, *Context*, *Constraints / not doing*, *Decisions*, *Open questions*, *Log*.
-- Default lanes: `idea → ready → doing → review → done → archived`. Leaving the first lane needs *Done when*; moving back needs a reason. Deleting is archiving.
+- Default lanes: `TODO → DOING → DONE → ARCHIVED`. Leaving the first lane needs *Done when*; moving back needs a reason. Deleting is archiving.
 - `.board.json` sets the folders and lanes:
 
 ```json
-{ "docs": "docs", "board": "docs/board", "lanes": ["idea", "ready", "doing", "review", "done", "archived"], "attachments": "lfs", "archive": "archived" }
+{ "docs": "docs", "board": "docs/board", "lanes": ["TODO", "DOING", "DONE", "ARCHIVED"], "attachments": "lfs", "archive": "ARCHIVED" }
 ```
+
+### Lanes per repo
+
+Each repo has its own lanes in `.board.json`, and every board in that repo uses them. Change them from chat with `set_lanes`, or locally with `kanbai lanes`:
+
+```sh
+node plugin/bin/kanbai.mjs lanes BACKLOG DOING REVIEW DONE --rename TODO=BACKLOG
+```
+
+- The archive lane is always last, and added when you leave it out (`ARCHIVED`, or `archived` when all lanes are lowercase).
+- Issues in a lane that is renamed follow `--rename`; issues in a dropped lane go to the first lane. Each gets a Log line.
+- Editing `.board.json` by hand works too: the doctor then moves issues in unknown lanes to the first lane.
+- An issue in a lane named `DOING` (any case) gets you as assignee when you move it there unassigned.
 
 ## Packages
 
@@ -92,6 +105,7 @@ npx wrangler dev
 | --- | --- |
 | `list_repos`, `set_default_repo` | Pick the repo the other tools use. |
 | `init_board` | Writes `.board.json` and the board files. |
+| `set_lanes` | Changes the repo's lanes and moves issues along. |
 | `get_board` | A board with its lanes, and the other boards. |
 | `create_issue`, `create_issues` | File one issue, or a batch (e.g. a feature with sub-issues) in one commit. |
 | `reserve_numbers` | Numbers without files, for the local flow. |

@@ -12,6 +12,7 @@ import {
   addComment,
   archiveIssue,
   boardChanges,
+  changeLanes,
   contextPack,
   createIssue,
   findIssue,
@@ -254,6 +255,29 @@ export function createServer(env: Env, props: Props): McpServer {
           return { changes, headline: 'kanbai: set up the board', result: config };
         });
         return text(`Board ready in ${result.board} with lanes ${result.lanes.join(' → ')}.${commitText(commit)}`);
+      }),
+  );
+
+  server.registerTool(
+    'set_lanes',
+    {
+      description:
+        'Changes the columns of this repo\'s boards: writes .board.json, moves issues out of lanes that are renamed or dropped (by rename, otherwise to the first lane), and regenerates every board file, in one commit. The archive lane is always added last.',
+      inputSchema: z.object({
+        repo: repoArg,
+        lanes: z.array(z.string()).min(1).describe('New lanes in order, e.g. ["TODO", "DOING", "REVIEW", "DONE"]. Kebab-case; case is kept as written.'),
+        rename: z.record(z.string(), z.string()).optional().describe('Old lane → new lane, e.g. {"idea": "TODO"}. Issues in other dropped lanes go to the first lane.'),
+      }),
+    },
+    ({ repo, lanes, rename }) =>
+      guard(async () => {
+        const { result, commit } = await session.commit(repo, (state) => {
+          const changed = changeLanes(state.board, state.config, { lanes, rename, today: today() });
+          if (!changed.ok) throw new UserError(changed.error);
+          return { changes: changed.changes, headline: `kanbai: lanes ${changed.config.lanes.join(', ')}`, result: changed };
+        });
+        const moved = result.moved.length ? `\n\nMoved ${result.moved.length} issue(s): ${result.moved.map((entry) => `${formatId(entry.issue.board, entry.issue.number)} ${entry.from} → ${entry.to}`).join(', ')}.` : '';
+        return text(`Lanes are now ${result.config.lanes.join(' → ')}.${moved}${commitText(commit)}`);
       }),
   );
 

@@ -6953,9 +6953,9 @@ var CONFIG_PATH = ".board.json";
 var DEFAULT_CONFIG = {
   docs: "docs",
   board: "docs/board",
-  lanes: ["idea", "ready", "doing", "review", "done", "archived"],
+  lanes: ["TODO", "DOING", "DONE", "ARCHIVED"],
   attachments: "lfs",
-  archive: "archived"
+  archive: "ARCHIVED"
 };
 var FALLBACK_BOARDS = ["docs/board", "wiki/board"];
 var trimSlashes = (path) => path.replace(/^\/+|\/+$/g, "");
@@ -7010,8 +7010,14 @@ function resolveConfig(raw, existingDirs = []) {
     if (typeof value.archive !== "string")
       return { ok: false, error: '"archive" must be a lane name.' };
     config.archive = value.archive;
-  } else if (value.lanes !== undefined && !config.lanes.includes(config.archive)) {
-    config.lanes = [...config.lanes, config.archive];
+  } else if (value.lanes !== undefined) {
+    const existing = config.lanes.find((lane) => lane.toLowerCase() === "archived");
+    if (existing)
+      config.archive = existing;
+    else {
+      config.archive = config.lanes.every((lane) => lane === lane.toLowerCase()) ? "archived" : "ARCHIVED";
+      config.lanes = [...config.lanes, config.archive];
+    }
   }
   if (config.lanes[config.lanes.length - 1] !== config.archive) {
     return { ok: false, error: `The archive lane "${config.archive}" must be the last lane.` };
@@ -7584,7 +7590,7 @@ function moveIssue(board, config, ref, lane, options) {
     return { ok: false, error: `Moving back from "${from}" to "${lane}" needs a reason, which goes in the Log.` };
   }
   const frontmatter = { ...current.frontmatter, status: lane };
-  if (lane === "doing" && !frontmatter.assignee && options.actor)
+  if (lane.toLowerCase() === "doing" && !frontmatter.assignee && options.actor)
     frontmatter.assignee = options.actor;
   const verb = lane === config.archive ? "Archived" : `Moved from ${from || "nowhere"} to ${lane}`;
   const note = `${verb}${options.reason?.trim() ? `: ${options.reason.trim()}` : "."}`;
@@ -7721,6 +7727,38 @@ function contextPack(board, files, docsDir, ref) {
     mentions: mentions.slice(0, 30),
     files: [...paths].slice(0, 20)
   };
+}
+function changeLanes(board, config, change) {
+  const { archive: _archive, ...rest } = config;
+  const resolved = resolveConfig(JSON.stringify({ ...rest, lanes: change.lanes }));
+  if (!resolved.ok)
+    return { ok: false, error: resolved.error };
+  const next = resolved.config;
+  for (const [from, to] of Object.entries(change.rename ?? {})) {
+    if (!next.lanes.includes(to))
+      return { ok: false, error: `rename: "${from}" → "${to}", but "${to}" isn't one of the new lanes.` };
+  }
+  const moved = [];
+  for (const issue of board.issues) {
+    const from = issue.frontmatter.status;
+    if (next.lanes.includes(from) && !change.rename?.[from])
+      continue;
+    const to = change.rename?.[from] ?? (from === config.archive ? next.archive : next.lanes[0]);
+    if (to === from)
+      continue;
+    moved.push({
+      issue: { ...issue, frontmatter: { ...issue.frontmatter, status: to }, body: appendLog(issue.body, change.today, `Lane "${from}" became "${to}" when the board's lanes changed.`) },
+      from,
+      to
+    });
+  }
+  const issues = moved.map((entry) => entry.issue);
+  const changes = [
+    { path: CONFIG_PATH, content: serializeConfig(next) },
+    ...issues.map((issue) => ({ path: issue.path, content: serializeIssue(issue) })),
+    ...boardChanges(board, next, issues, board.boards.keys())
+  ];
+  return { ok: true, config: next, changes, moved };
 }
 // ../core/src/doctor.ts
 var titleFromSlug = (slug) => slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, " ");
@@ -7940,6 +7978,7 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
+  kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along
 
 Options: --root DIR (default: nearest folder with .git or .board.json), --json
 Ids: 012 on the main board, ANT-TEST_012 on board ANT-TEST. Changes are written, not committed.`;
@@ -7957,7 +7996,7 @@ function requireRef(value) {
     fail(`"${value}" isn't an issue id. Use 012 or BOARD_012.`);
   return ref;
 }
-var STRING_OPTIONS = new Set(["root", "number", "board", "parent", "title", "why", "type", "status", "done-when", "context", "constraints", "decisions", "open-questions", "tag", "assignee", "lane", "text", "reason", "actor", "note"]);
+var STRING_OPTIONS = new Set(["root", "number", "board", "parent", "title", "why", "type", "status", "done-when", "context", "constraints", "decisions", "open-questions", "tag", "assignee", "lane", "text", "reason", "actor", "note", "rename"]);
 function glueValues(argv) {
   const result = [];
   for (let index = 0;index < argv.length; index++) {
@@ -7999,6 +8038,7 @@ function main(argv) {
       reason: { type: "string" },
       actor: { type: "string" },
       note: { type: "string" },
+      rename: { type: "string", multiple: true },
       fix: { type: "boolean" },
       "fix-all": { type: "boolean" }
     }
@@ -8033,6 +8073,23 @@ Missing: ${result.missing.map((question) => question.section).join(", ")}` : ""}
     case "board": {
       const changes = boardChanges(board, config, [], board.boards.keys());
       out(changes.length ? `Regenerated ${write(changes).join(", ")}` : "Board files are up to date.");
+      return;
+    }
+    case "lanes": {
+      if (!rest.length) {
+        out(config.lanes.join(" → "), config.lanes);
+        return;
+      }
+      const rename = {};
+      for (const pair of values.rename ?? []) {
+        const [from, to] = pair.split("=");
+        if (!from || !to)
+          fail(`--rename "${pair}" must look like OLD=NEW.`);
+        rename[from] = to;
+      }
+      const changed = unwrap(changeLanes(board, config, { lanes: rest, rename, today: today() }));
+      write(changed.changes);
+      out(`Lanes are now ${changed.config.lanes.join(" → ")}.${changed.moved.length ? ` Moved ${changed.moved.length} issue(s).` : ""}`);
       return;
     }
     case "list": {

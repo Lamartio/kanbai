@@ -7,6 +7,7 @@ import {
   type IssueType,
   addComment,
   archiveIssue,
+  changeLanes,
   boardChanges,
   contextPack,
   createIssue,
@@ -43,6 +44,7 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
+  kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along
 
 Options: --root DIR (default: nearest folder with .git or .board.json), --json
 Ids: 012 on the main board, ANT-TEST_012 on board ANT-TEST. Changes are written, not committed.`;
@@ -61,7 +63,7 @@ function requireRef(value: string | undefined) {
   return ref;
 }
 
-const STRING_OPTIONS = new Set(['root', 'number', 'board', 'parent', 'title', 'why', 'type', 'status', 'done-when', 'context', 'constraints', 'decisions', 'open-questions', 'tag', 'assignee', 'lane', 'text', 'reason', 'actor', 'note']);
+const STRING_OPTIONS = new Set(['root', 'number', 'board', 'parent', 'title', 'why', 'type', 'status', 'done-when', 'context', 'constraints', 'decisions', 'open-questions', 'tag', 'assignee', 'lane', 'text', 'reason', 'actor', 'note', 'rename']);
 
 /** `--done-when "- [ ] x"` would be read as an option; glue such values on with `=`. */
 function glueValues(argv: string[]): string[] {
@@ -104,6 +106,7 @@ function main(argv: string[]) {
       reason: { type: 'string' },
       actor: { type: 'string' },
       note: { type: 'string' },
+      rename: { type: 'string', multiple: true },
       fix: { type: 'boolean' },
       'fix-all': { type: 'boolean' },
     },
@@ -134,6 +137,22 @@ function main(argv: string[]) {
     case 'board': {
       const changes = boardChanges(board, config, [], board.boards.keys());
       out(changes.length ? `Regenerated ${write(changes).join(', ')}` : 'Board files are up to date.');
+      return;
+    }
+    case 'lanes': {
+      if (!rest.length) {
+        out(config.lanes.join(' → '), config.lanes);
+        return;
+      }
+      const rename: Record<string, string> = {};
+      for (const pair of values.rename ?? []) {
+        const [from, to] = pair.split('=');
+        if (!from || !to) fail(`--rename "${pair}" must look like OLD=NEW.`);
+        rename[from] = to;
+      }
+      const changed = unwrap(changeLanes(board, config, { lanes: rest, rename, today: today() }));
+      write(changed.changes);
+      out(`Lanes are now ${changed.config.lanes.join(' → ')}.${changed.moved.length ? ` Moved ${changed.moved.length} issue(s).` : ''}`);
       return;
     }
     case 'list': {

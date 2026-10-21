@@ -1,4 +1,4 @@
-import { type BoardConfig } from './config.js';
+import { CONFIG_PATH, type BoardConfig, resolveConfig, serializeConfig } from './config.js';
 import { type FileChange, type LoadedBoard, boardChanges, newIssuePath } from './board.js';
 import {
   type Frontmatter,
@@ -176,7 +176,7 @@ export function mergeChanges(...lists: FileChange[][]): FileChange[] {
 export interface MoveOptions {
   today: string;
   reason?: string;
-  /** GitHub login of whoever moves it; becomes the assignee when entering "doing" unassigned. */
+  /** GitHub login of whoever moves it; becomes the assignee when entering a lane named doing (any case) unassigned. */
   actor?: string;
 }
 
@@ -200,7 +200,7 @@ export function moveIssue(board: LoadedBoard, config: BoardConfig, ref: IssueRef
     return { ok: false, error: `Moving back from "${from}" to "${lane}" needs a reason, which goes in the Log.` };
   }
   const frontmatter: Frontmatter = { ...current.frontmatter, status: lane };
-  if (lane === 'doing' && !frontmatter.assignee && options.actor) frontmatter.assignee = options.actor;
+  if (lane.toLowerCase() === 'doing' && !frontmatter.assignee && options.actor) frontmatter.assignee = options.actor;
   const verb = lane === config.archive ? 'Archived' : `Moved from ${from || 'nowhere'} to ${lane}`;
   const note = `${verb}${options.reason?.trim() ? `: ${options.reason.trim()}` : '.'}`;
   const issue: Issue = { ...current, frontmatter, body: appendLog(current.body, options.today, note) };
@@ -377,4 +377,51 @@ export function contextPack(board: LoadedBoard, files: Record<string, string>, d
     mentions: mentions.slice(0, 30),
     files: [...paths].slice(0, 20),
   };
+}
+
+// ------------------------------------------------------------- lanes
+
+export interface LaneChange {
+  /** The new lanes, in order. The archive lane is added last when missing. */
+  lanes: string[];
+  /** Old lane → new lane, for issues whose lane is renamed or dropped. */
+  rename?: Record<string, string>;
+  today: string;
+}
+
+/**
+ * Changes a repo's lanes: writes `.board.json`, moves issues out of lanes that no longer exist
+ * (by `rename`, otherwise to the first lane), and regenerates every board file.
+ */
+export function changeLanes(
+  board: LoadedBoard,
+  config: BoardConfig,
+  change: LaneChange,
+): { ok: true; config: BoardConfig; changes: FileChange[]; moved: { issue: Issue; from: string; to: string }[] } | OpError {
+  const { archive: _archive, ...rest } = config;
+  const resolved = resolveConfig(JSON.stringify({ ...rest, lanes: change.lanes }));
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+  const next = resolved.config;
+  for (const [from, to] of Object.entries(change.rename ?? {})) {
+    if (!next.lanes.includes(to)) return { ok: false, error: `rename: "${from}" → "${to}", but "${to}" isn't one of the new lanes.` };
+  }
+  const moved: { issue: Issue; from: string; to: string }[] = [];
+  for (const issue of board.issues) {
+    const from = issue.frontmatter.status;
+    if (next.lanes.includes(from) && !change.rename?.[from]) continue;
+    const to = change.rename?.[from] ?? (from === config.archive ? next.archive : next.lanes[0]!);
+    if (to === from) continue;
+    moved.push({
+      issue: { ...issue, frontmatter: { ...issue.frontmatter, status: to }, body: appendLog(issue.body, change.today, `Lane "${from}" became "${to}" when the board's lanes changed.`) },
+      from,
+      to,
+    });
+  }
+  const issues = moved.map((entry) => entry.issue);
+  const changes: FileChange[] = [
+    { path: CONFIG_PATH, content: serializeConfig(next) },
+    ...issues.map((issue) => ({ path: issue.path, content: serializeIssue(issue) })),
+    ...boardChanges(board, next, issues, board.boards.keys()),
+  ];
+  return { ok: true, config: next, changes, moved };
 }
