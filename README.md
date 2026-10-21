@@ -168,7 +168,7 @@ How it works:
 4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
 5. It records *done* or *failed* (who, where, when, exit code, end of the log). A failed tag waits for `--retry` or a new tag. `publish <tag> --release` drops a claim by hand.
 
-Deploy secrets stay on the client that builds: in `.env.publish` (add it to `.gitignore`), in your shell, or as environment secrets of the Claude Code container. The MCP's `publish_status` shows the pipeline from chat.
+Deploy secrets stay on the client that builds: in `.env.publish` (add it to `.gitignore`), in your shell, or as environment secrets of the Claude Code container. Values from `${NAME}` references and from the env file are masked as `***` in the build output, both on screen and in the log recorded on the publish branch. The MCP's `publish_status` shows the pipeline from chat.
 
 ## Local flow: the Claude Code plugin
 

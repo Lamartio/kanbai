@@ -25,15 +25,32 @@ export function parseEnvFile(text: string): Record<string, string> {
 export function resolvePublishEnv(
   env: Record<string, string>,
   source: Record<string, string | undefined>,
-): { ok: true; env: Record<string, string> } | { ok: false; missing: string[] } {
+): { ok: true; env: Record<string, string>; secrets: string[] } | { ok: false; missing: string[] } {
   const missing = new Set<string>();
   const resolved: Record<string, string> = {};
+  const secrets = new Set<string>();
   for (const [name, value] of Object.entries(env)) {
+    let referenced = false;
     resolved[name] = value.replace(REFERENCE, (_, ref: string) => {
+      referenced = true;
       const found = source[ref];
       if (found === undefined || found === '') missing.add(ref);
+      else secrets.add(found);
       return found ?? '';
     });
+    // A value built from a reference ("Bearer ${TOKEN}") is secret as a whole too.
+    if (referenced && resolved[name]) secrets.add(resolved[name]!);
   }
-  return missing.size ? { ok: false, missing: [...missing] } : { ok: true, env: resolved };
+  return missing.size ? { ok: false, missing: [...missing] } : { ok: true, env: resolved, secrets: [...secrets] };
+}
+
+/** Values shorter than this aren't masked: they would garble ordinary output. */
+const MIN_SECRET_LENGTH = 4;
+
+/** Replaces every secret value in `text` with ***. Longer secrets first, so overlaps mask fully. */
+export function maskSecrets(text: string, secrets: Iterable<string>): string {
+  const list = [...new Set(secrets)].filter((secret) => secret.length >= MIN_SECRET_LENGTH).sort((a, b) => b.length - a.length);
+  let masked = text;
+  for (const secret of list) masked = masked.split(secret).join('***');
+  return masked;
 }

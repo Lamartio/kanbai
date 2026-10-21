@@ -8025,15 +8025,30 @@ function parseEnvFile(text) {
 function resolvePublishEnv(env, source) {
   const missing = new Set;
   const resolved = {};
+  const secrets = new Set;
   for (const [name, value] of Object.entries(env)) {
+    let referenced = false;
     resolved[name] = value.replace(REFERENCE, (_, ref) => {
+      referenced = true;
       const found = source[ref];
       if (found === undefined || found === "")
         missing.add(ref);
+      else
+        secrets.add(found);
       return found ?? "";
     });
+    if (referenced && resolved[name])
+      secrets.add(resolved[name]);
   }
-  return missing.size ? { ok: false, missing: [...missing] } : { ok: true, env: resolved };
+  return missing.size ? { ok: false, missing: [...missing] } : { ok: true, env: resolved, secrets: [...secrets] };
+}
+var MIN_SECRET_LENGTH = 4;
+function maskSecrets(text, secrets) {
+  const list = [...new Set(secrets)].filter((secret) => secret.length >= MIN_SECRET_LENGTH).sort((a, b) => b.length - a.length);
+  let masked = text;
+  for (const secret of list)
+    masked = masked.split(secret).join("***");
+  return masked;
 }
 // src/publish.ts
 import { execFileSync, spawn } from "node:child_process";
@@ -8172,7 +8187,7 @@ function publishEnvironment(git, config) {
   for (const [name, value] of Object.entries(source))
     if (value !== undefined)
       env[name] = value;
-  return { ok: true, env: { ...env, ...resolved.env } };
+  return { ok: true, env: { ...env, ...resolved.env }, secrets: [...resolved.secrets, ...Object.values(fromFile)] };
 }
 async function publish2(git, config, options) {
   git.sync(config.branch);
@@ -8236,17 +8251,29 @@ async function publish2(git, config, options) {
         env: { ...environment.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
         stdio: ["ignore", "pipe", "pipe"]
       });
+      let pending = "";
+      const emit = (line) => {
+        const masked = maskSecrets(line, environment.secrets);
+        output += `${masked}
+`;
+        if (masked)
+          options.log(`  ${masked}`);
+      };
       const collect = (chunk) => {
-        const text = chunk.toString();
-        output += text;
-        for (const line of text.split(`
-`))
-          if (line)
-            options.log(`  ${line}`);
+        pending += chunk.toString();
+        const lines = pending.split(`
+`);
+        pending = lines.pop() ?? "";
+        lines.forEach(emit);
       };
       child.stdout.on("data", collect);
       child.stderr.on("data", collect);
-      child.on("close", (code) => resolve(code ?? 1));
+      child.on("close", (code) => {
+        if (pending)
+          emit(pending);
+        pending = "";
+        resolve(code ?? 1);
+      });
       child.on("error", (error) => {
         output += String(error);
         resolve(127);

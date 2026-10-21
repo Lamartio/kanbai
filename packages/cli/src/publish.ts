@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type EventKind, type PublishConfig, type PublishEvent, type TagStatus, parseEnvFile, parseEvent, publishStatuses, resolvePublishEnv } from '@kanbai/core';
+import { type EventKind, type PublishConfig, type PublishEvent, type TagStatus, maskSecrets, parseEnvFile, parseEvent, publishStatuses, resolvePublishEnv } from '@kanbai/core';
 
 export type { PublishEvent, TagStatus } from '@kanbai/core';
 
@@ -171,7 +171,7 @@ function appendWithRetry(git: Git, config: PublishConfig, makeEvent: () => Publi
  * `publish.env` on top (`${NAME}` filled in). Refuses an env file that git tracks, so secrets
  * never get committed by accident.
  */
-export function publishEnvironment(git: Git, config: PublishConfig): { ok: true; env: Record<string, string> } | { ok: false; reason: string } {
+export function publishEnvironment(git: Git, config: PublishConfig): { ok: true; env: Record<string, string>; secrets: string[] } | { ok: false; reason: string } {
   const file = join(git.cwd, ...config.envFile.split('/'));
   let fromFile: Record<string, string> = {};
   if (existsSync(file)) {
@@ -191,7 +191,8 @@ export function publishEnvironment(git: Git, config: PublishConfig): { ok: true;
   }
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(source)) if (value !== undefined) env[name] = value;
-  return { ok: true, env: { ...env, ...resolved.env } };
+  // Everything from the env file is treated as secret, plus every value that came from a reference.
+  return { ok: true, env: { ...env, ...resolved.env }, secrets: [...resolved.secrets, ...Object.values(fromFile)] };
 }
 
 /** Picks the tag, claims it, runs the command in a clean checkout, and records the outcome. */
@@ -260,14 +261,26 @@ export async function publish(git: Git, config: PublishConfig, options: PublishO
         env: { ...environment.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      // Secrets are masked per complete line, so a value split across two chunks is still caught.
+      let pending = '';
+      const emit = (line: string) => {
+        const masked = maskSecrets(line, environment.secrets);
+        output += `${masked}\n`;
+        if (masked) options.log(`  ${masked}`);
+      };
       const collect = (chunk: Buffer) => {
-        const text = chunk.toString();
-        output += text;
-        for (const line of text.split('\n')) if (line) options.log(`  ${line}`);
+        pending += chunk.toString();
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        lines.forEach(emit);
       };
       child.stdout.on('data', collect);
       child.stderr.on('data', collect);
-      child.on('close', (code) => resolve(code ?? 1));
+      child.on('close', (code) => {
+        if (pending) emit(pending);
+        pending = '';
+        resolve(code ?? 1);
+      });
       child.on('error', (error) => {
         output += String(error);
         resolve(127);

@@ -146,6 +146,19 @@ describe('git-based publish', () => {
     expect(JSON.stringify(a.events())).not.toContain('s3cret');
   });
 
+  it('masks secrets the script prints, on screen and in the recorded log', async () => {
+    writeFileSync(join(a.cwd, '.env.publish'), 'DEPLOY_TOKEN=s3cret-value\n');
+    const lines: string[] = [];
+    const result = await publish(a, config('echo "using $TOKEN"; printf "partial s3cret-va"; printf "lue end\\n"; exit 1', 30, { TOKEN: '${DEPLOY_TOKEN}' }), { log: (line) => lines.push(line) });
+    expect(result.outcome).toBe('failed');
+    const output = lines.filter((line) => line.startsWith('  ')).join('\n');
+    expect(output).not.toContain('s3cret');
+    expect(output).toContain('using ***');
+    const failed = a.events().find((event) => event.kind === 'failed')!;
+    expect(failed.log).toContain('partial *** end');
+    expect(failed.log).not.toContain('s3cret');
+  });
+
   it('refuses an env file that git tracks', async () => {
     writeFileSync(join(a.cwd, '.env.publish'), 'DEPLOY_TOKEN=oops\n');
     git(a.cwd, 'add', '.env.publish');

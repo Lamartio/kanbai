@@ -53,7 +53,16 @@ describe('publish env', () => {
 
   it('passes plain values and fills references from the client', async () => {
     const { resolvePublishEnv } = await import('../src/index.js');
-    expect(resolvePublishEnv({ NODE_ENV: 'production', AUTH: 'Bearer ${TOKEN}' }, { TOKEN: 't' })).toEqual({ ok: true, env: { NODE_ENV: 'production', AUTH: 'Bearer t' } });
+    expect(resolvePublishEnv({ NODE_ENV: 'production', AUTH: 'Bearer ${TOKEN}' }, { TOKEN: 'tok3n' })).toEqual({
+      ok: true,
+      env: { NODE_ENV: 'production', AUTH: 'Bearer tok3n' },
+      secrets: ['tok3n', 'Bearer tok3n'],
+    });
     expect(resolvePublishEnv({ A: '${X}', B: '${Y}-${X}' }, { Y: 'y' })).toEqual({ ok: false, missing: ['X'] });
+  });
+
+  it('masks secrets in output', async () => {
+    const { maskSecrets } = await import('../src/index.js');
+    expect(maskSecrets('token=abcd1234 and Bearer abcd1234, short=ab', ['abcd1234', 'Bearer abcd1234', 'ab'])).toBe('token=*** and ***, short=ab');
   });
 });
