@@ -12,6 +12,10 @@ import {
   addComment,
   archiveIssue,
   boardChanges,
+  matchesTagPattern,
+  parseMarker,
+  publishStatuses,
+  type Marker,
   changeLanes,
   contextPack,
   createIssue,
@@ -577,6 +581,39 @@ export function createServer(env: Env, props: Props): McpServer {
           parts.push(content === null ? `## ${repoPath}\n\n(not found at this commit)` : `## ${repoPath}\n\n\`\`\`\n${content}\n\`\`\``);
         }
         return text(parts.join('\n\n'));
+      }),
+  );
+
+  server.registerTool(
+    'publish_status',
+    {
+      description:
+        'Shows the git-based publish pipeline per version tag: pending, building (who and where), done, failed (with the end of the log) or superseded. Read-only: publishing itself runs on a client with `kanbai publish` or /publish in Claude Code.',
+      inputSchema: z.object({ repo: repoArg }),
+    },
+    ({ repo }) =>
+      guard(async () => {
+        const state = await session.load(repo);
+        const pattern = state.config.publish?.tags ?? 'v*';
+        const refs = await session.github.publishRefs(state.repo);
+        const markers = new Map<string, { lock?: Marker; done?: Marker; failed?: Marker }>();
+        for (const ref of refs.markers) {
+          const [kind, ...rest] = ref.name.split('/');
+          const tag = rest.join('/');
+          if (kind !== 'lock' && kind !== 'done' && kind !== 'failed') continue;
+          const marker = parseMarker(ref.message);
+          if (marker) markers.set(tag, { ...markers.get(tag), [kind]: marker });
+        }
+        const statuses = publishStatuses(refs.tags.filter((entry) => matchesTagPattern(entry.tag, pattern)), markers);
+        if (!statuses.length) return text(`No tags match "${pattern}" in ${repoName(state)}.`);
+        const lines = statuses.slice(0, 20).map((status) => {
+          const marker = status.lock ?? status.done ?? status.failed;
+          const who = marker ? ` — ${marker.by} on ${marker.host}, ${marker.finished ?? marker.at}` : '';
+          const log = status.state === 'failed' && status.failed?.log ? `\n  exit ${status.failed.exitCode}, last output:\n${status.failed.log.split('\n').slice(-10).map((line) => `    ${line}`).join('\n')}` : '';
+          return `- ${status.tag} ${status.state}${who}${log}`;
+        });
+        const setup = state.config.publish ? '' : `\n\n${repoName(state)} has no "publish" section in .board.json yet, so clients can't publish it.`;
+        return text(`${lines.join('\n')}${setup}`);
       }),
   );
 

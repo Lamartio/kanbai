@@ -6,6 +6,8 @@ export class FakeGitHub {
   files: Record<string, string>;
   head = 'c0';
   commits: { oid: string; headline: string; paths: string[] }[] = [];
+  tags: string[] = [];
+  markers: { name: string; message: string }[] = [];
   private counter = 0;
 
   constructor(files: Record<string, string> = {}) {
@@ -62,6 +64,16 @@ export class FakeGitHub {
       this.head = `c${++this.counter}`;
       this.commits.push({ oid: this.head, headline: input.message.headline, paths: [...input.fileChanges.additions, ...input.fileChanges.deletions].map((change: { path: string }) => change.path) });
       return json({ data: { createCommitOnBranch: { commit: { oid: this.head, url: `https://github.com/lamartio/test/commit/${this.head}` } } } });
+    }
+    if (query.includes('refPrefix: "refs/kanbai/"')) {
+      return json({
+        data: {
+          repository: {
+            tags: { nodes: this.tags.map((tag) => ({ name: tag, target: { oid: `c-${tag}` } })) },
+            kanbai: { nodes: this.markers.map((marker) => ({ name: marker.name, target: { oid: 'm', message: marker.message } })) },
+          },
+        },
+      });
     }
     if (query.includes('defaultBranchRef')) {
       return json({ data: { repository: { defaultBranchRef: { name: 'main', target: { oid: this.head } } } } });

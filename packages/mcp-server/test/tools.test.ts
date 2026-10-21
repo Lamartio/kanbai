@@ -147,6 +147,16 @@ describe('tools against a fake GitHub', () => {
     expect(github.files['docs/board/000_board.md']).toContain('## REVIEW');
   });
 
+  it('shows publish states per tag', async () => {
+    github.push({ '.board.json': JSON.stringify({ publish: { command: 'npm run deploy' } }) });
+    github.tags = ['v1.0.0', 'v1.1.0'];
+    github.markers = [{ name: 'failed/v1.1.0', message: JSON.stringify({ tag: 'v1.1.0', commit: 'x', by: 'danny', host: 'ipad-container', at: '2026-10-21T10:00:00Z', finished: '2026-10-21T10:02:00Z', exitCode: 2, log: 'Error: missing token' }) }];
+    const result = await call('publish_status');
+    expect(result.text).toContain('v1.1.0 failed — danny on ipad-container');
+    expect(result.text).toContain('Error: missing token');
+    expect(result.text).toContain('v1.0.0 superseded');
+  });
+
   it('explains a missing repo instead of crashing', async () => {
     const handler = await call('get_board', { repo: 'not a repo' });
     expect(handler.isError).toBe(true);

@@ -152,6 +152,23 @@ export class GitHub {
     return dirs.filter((_, index) => data.repository[`d${index}`]?.__typename === 'Tree');
   }
 
+  /** Version tags (with their commits) and kanbai publish markers, in one query. */
+  async publishRefs(repo: RepoRef): Promise<{ tags: { tag: string; commit: string }[]; markers: { name: string; message: string }[] }> {
+    type Ref = { name: string; target: { oid: string; message?: string; target?: { oid: string } } | null };
+    const data = await this.graphql<{ repository: { tags: { nodes: Ref[] }; kanbai: { nodes: Ref[] } } | null }>(
+      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+        tags: refs(refPrefix: "refs/tags/", first: 100, orderBy: { field: TAG_COMMIT_DATE, direction: DESC }) { nodes { name target { oid ... on Tag { target { oid } } } } }
+        kanbai: refs(refPrefix: "refs/kanbai/", first: 100) { nodes { name target { oid ... on Commit { message } } } }
+      } }`,
+      { owner: repo.owner, name: repo.name },
+    );
+    if (!data.repository) throw new GitHubError(`Repo ${repo.owner}/${repo.name} not found, or not accessible with this login.`, 404);
+    return {
+      tags: data.repository.tags.nodes.map((ref) => ({ tag: ref.name, commit: ref.target?.target?.oid ?? ref.target?.oid ?? '' })),
+      markers: data.repository.kanbai.nodes.map((ref) => ({ name: ref.name, message: ref.target?.message ?? '' })),
+    };
+  }
+
   /** One small file at a commit, as text. Returns null when missing or too large. */
   async readFile(repo: RepoRef, oid: string, path: string, maxBytes = 20_000): Promise<string | null> {
     try {

@@ -114,8 +114,33 @@ npx wrangler dev
 | `search_issues`, `search_docs` | Find issues by filters, or anything in the docs. |
 | `context_pack` | Everything needed to start on an issue, in one call. |
 | `doctor` | Finds and fixes problems after hand edits: duplicates, unknown lanes, stale board files, a lagging number counter. |
+| `publish_status` | Read-only view of the publish pipeline per tag (see below). |
 
 Every write is one commit on the default branch. If someone pushed in between, the server reads again and retries.
+
+## Publishing from any client, without a build server
+
+Build and deploy on your own machine or in a Claude Code container. Git decides who builds a tag, so two clients never deploy the same release.
+
+```json
+{ "publish": { "command": "npm ci && npm run deploy", "tags": "v*", "leaseMinutes": 30 } }
+```
+
+```sh
+git tag v1.4.0 && git push --tags
+node plugin/bin/kanbai.mjs publish          # or /publish in Claude Code
+node plugin/bin/kanbai.mjs publish --list   # pending, building, done, failed per tag
+```
+
+How it works:
+
+1. `publish` takes the newest tag matching `publish.tags` that isn't done yet. Older open tags are *superseded*.
+2. It **claims** the tag by pushing `refs/kanbai/lock/<tag>`. The remote refuses to create a ref that already exists, so of two clients claiming at once, exactly one wins; the other reports who is building.
+3. It runs `publish.command` in a **clean checkout** of the tag (a temporary git worktree), with `KANBAI_TAG` and `KANBAI_COMMIT` set. Your working copy, and agents working in it, aren't touched.
+4. While it runs, it renews the claim. A claim that isn't renewed within `leaseMinutes` (a crashed container, a closed laptop) can be taken over by the next client.
+5. It records `refs/kanbai/done/<tag>` or `refs/kanbai/failed/<tag>` (who, where, when, exit code, end of the log) and drops the claim, in one atomic push. A failed tag waits for `--retry` or a new tag.
+
+The refs live outside branches and tags, so they don't clutter GitHub. Deploy secrets stay on the client that builds: set them in your shell, or as environment secrets of the Claude Code container. `publish <tag> --release` drops a claim by hand.
 
 ## Local flow: the Claude Code plugin
 
@@ -124,7 +149,7 @@ Every write is one commit on the default branch. If someone pushed in between, t
 /plugin install kanbai@kanbai
 ```
 
-The plugin connects Claude Code to the MCP server (edit `plugin/.mcp.json` if your URL differs) and adds the `kanbai` skill. Claude then reserves numbers with `reserve_numbers` and edits files with the CLI, so parallel agents stay fast and never collide. You commit the board changes with the code.
+The plugin connects Claude Code to the MCP server (edit `plugin/.mcp.json` if your URL differs), adds the `kanbai` skill, and adds `/publish`. Claude then reserves numbers with `reserve_numbers` and edits files with the CLI, so parallel agents stay fast and never collide. You commit the board changes with the code.
 
 The CLI works on its own too:
 

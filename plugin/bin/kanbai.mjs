@@ -7006,6 +7006,20 @@ function resolveConfig(raw, existingDirs = []) {
       return { ok: false, error: '"attachments" must be "lfs" or "r2".' };
     config.attachments = value.attachments;
   }
+  if (value.publish !== undefined) {
+    const publish = value.publish;
+    if (typeof publish !== "object" || publish === null || Array.isArray(publish))
+      return { ok: false, error: '"publish" must be an object.' };
+    if (typeof publish.command !== "string" || !publish.command.trim())
+      return { ok: false, error: '"publish.command" must be the shell command that builds and deploys.' };
+    const tags = publish.tags ?? "v*";
+    const leaseMinutes = publish.leaseMinutes ?? 30;
+    if (typeof tags !== "string" || !tags.trim())
+      return { ok: false, error: '"publish.tags" must be a tag pattern, like v*.' };
+    if (typeof leaseMinutes !== "number" || !(leaseMinutes > 0))
+      return { ok: false, error: '"publish.leaseMinutes" must be a positive number.' };
+    config.publish = { command: publish.command, tags, leaseMinutes };
+  }
   if (value.archive !== undefined) {
     if (typeof value.archive !== "string")
       return { ok: false, error: '"archive" must be a lane name.' };
@@ -7894,13 +7908,210 @@ function runDoctor(snapshot, board, config, options) {
   }
   return { problems, safe, proposed, numbersNeeded };
 }
+// src/publish.ts
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+var NS = "refs/kanbai";
+var EMPTY_TREE_INPUT = "";
+
+class Git {
+  cwd;
+  remote;
+  constructor(cwd, remote = "origin") {
+    this.cwd = cwd;
+    this.remote = remote;
+  }
+  run(args, input) {
+    return execFileSync("git", args, { cwd: this.cwd, input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  }
+  tryRun(args, input) {
+    try {
+      return { ok: true, out: this.run(args, input) };
+    } catch (error) {
+      const failure = error;
+      return { ok: false, err: (failure.stderr || failure.message).trim() };
+    }
+  }
+  sync() {
+    this.run(["fetch", "--quiet", "--prune", this.remote, `+${NS}/*:${NS}/*`]);
+    this.run(["fetch", "--quiet", "--tags", this.remote]);
+  }
+  identity() {
+    const name = this.tryRun(["config", "user.name"]);
+    const email = this.tryRun(["config", "user.email"]);
+    const by = name.ok && name.out ? email.ok && email.out ? `${name.out} <${email.out}>` : name.out : process.env.USER || "unknown";
+    return { by, host: process.env.KANBAI_HOST || hostname() };
+  }
+  markerCommit(marker) {
+    const tree = this.run(["mktree"], EMPTY_TREE_INPUT);
+    return this.run(["-c", "user.name=kanbai", "-c", "user.email=kanbai@localhost", "commit-tree", tree, "-m", JSON.stringify(marker)]);
+  }
+  readMarker(ref) {
+    const message = this.tryRun(["log", "-1", "--format=%B", ref]);
+    if (!message.ok)
+      return;
+    try {
+      return JSON.parse(message.out);
+    } catch {
+      return;
+    }
+  }
+  refSha(ref) {
+    const result = this.tryRun(["rev-parse", "--verify", "--quiet", ref]);
+    return result.ok ? result.out : undefined;
+  }
+  versionTags(pattern) {
+    const out = this.run(["tag", "--list", pattern, "--sort=-v:refname", "--format=%(refname:short) %(*objectname)%(objectname)"]);
+    return out.split(`
+`).filter(Boolean).map((line) => {
+      const [tag, shas] = line.split(" ");
+      return { tag, commit: shas.slice(0, 40) };
+    });
+  }
+  push(args) {
+    const result = this.tryRun(["push", "--quiet", "--porcelain", this.remote, ...args]);
+    return result.ok ? { ok: true } : result;
+  }
+}
+var lockRef = (tag) => `${NS}/lock/${tag}`;
+var doneRef = (tag) => `${NS}/done/${tag}`;
+var failedRef = (tag) => `${NS}/failed/${tag}`;
+function tagStatuses(git, config, now = new Date) {
+  const tags = git.versionTags(config.tags);
+  let newestOpen = true;
+  return tags.map(({ tag, commit }) => {
+    const lock = git.readMarker(lockRef(tag));
+    const done = git.readMarker(doneRef(tag));
+    const failed = git.readMarker(failedRef(tag));
+    let state;
+    if (done)
+      state = "done";
+    else if (lock)
+      state = lock.expires && new Date(lock.expires) < now ? "stale" : "building";
+    else if (failed)
+      state = "failed";
+    else
+      state = newestOpen ? "pending" : "superseded";
+    newestOpen = false;
+    return { tag, commit, state, lock, done, failed };
+  });
+}
+function tail(text, lines = 40) {
+  return text.split(`
+`).slice(-lines).join(`
+`).slice(-4000);
+}
+async function publish(git, config, options) {
+  git.sync();
+  const statuses = tagStatuses(git, config);
+  let target;
+  if (options.tag) {
+    target = statuses.find((status) => status.tag === options.tag);
+    if (!target)
+      return { outcome: "nothing", reason: `Tag ${options.tag} doesn't exist (or doesn't match "${config.tags}").` };
+  } else {
+    target = statuses[0];
+    if (!target)
+      return { outcome: "nothing", reason: `No tags match "${config.tags}". Create one first, e.g. git tag v0.1.0 && git push --tags.` };
+  }
+  if (target.state === "done")
+    return { outcome: "nothing", reason: `${target.tag} is already published (by ${target.done.by} on ${target.done.host}, ${target.done.finished}).` };
+  if (target.state === "building")
+    return { outcome: "busy", tag: target.tag, by: target.lock.by, host: target.lock.host };
+  if (target.state === "failed" && !options.retry) {
+    return { outcome: "nothing", reason: `${target.tag} failed last time (exit ${target.failed.exitCode}, ${target.failed.host}). Fix it with a new tag, or run again with --retry.` };
+  }
+  if (options.dryRun)
+    return { outcome: "dry-run", tag: target.tag };
+  const { tag, commit } = target;
+  const me = git.identity();
+  const leaseMs = config.leaseMinutes * 60000;
+  const started = new Date;
+  const lockMarker = () => ({ tag, commit, ...me, at: started.toISOString(), expires: new Date(Date.now() + leaseMs).toISOString() });
+  let lockSha = git.markerCommit(lockMarker());
+  const staleSha = target.state === "stale" ? git.refSha(lockRef(tag)) : undefined;
+  const claim = staleSha ? git.push([`--force-with-lease=${lockRef(tag)}:${staleSha}`, `${lockSha}:${lockRef(tag)}`]) : git.push([`${lockSha}:${lockRef(tag)}`]);
+  if (!claim.ok) {
+    git.sync();
+    const lock = git.readMarker(lockRef(tag));
+    return { outcome: "busy", tag, by: lock?.by ?? "someone", host: lock?.host ?? "another client" };
+  }
+  options.log(`Claimed ${tag} (${commit.slice(0, 7)}) as ${me.by} on ${me.host}.${staleSha ? " Took over an expired claim." : ""}`);
+  let lost = false;
+  const heartbeat = setInterval(() => {
+    const next = git.markerCommit(lockMarker());
+    const result = git.push([`--force-with-lease=${lockRef(tag)}:${lockSha}`, `${next}:${lockRef(tag)}`]);
+    if (result.ok)
+      lockSha = next;
+    else
+      lost = true;
+  }, options.heartbeatMs ?? Math.max(1000, leaseMs / 3));
+  const dir = mkdtempSync(join(tmpdir(), `kanbai-publish-${tag.replace(/[^\w.-]/g, "_")}-`));
+  let output = "";
+  let exitCode = 1;
+  try {
+    git.run(["worktree", "add", "--detach", "--quiet", dir, commit]);
+    options.log(`Running "${config.command}" in a clean checkout of ${tag}…`);
+    exitCode = await new Promise((resolve) => {
+      const child = spawn(config.command, {
+        cwd: dir,
+        shell: true,
+        env: { ...process.env, KANBAI_TAG: tag, KANBAI_COMMIT: commit },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const collect = (chunk) => {
+        const text = chunk.toString();
+        output += text;
+        for (const line of text.split(`
+`))
+          if (line)
+            options.log(`  ${line}`);
+      };
+      child.stdout.on("data", collect);
+      child.stderr.on("data", collect);
+      child.on("close", (code) => resolve(code ?? 1));
+      child.on("error", (error) => {
+        output += String(error);
+        resolve(127);
+      });
+    });
+  } finally {
+    clearInterval(heartbeat);
+    git.tryRun(["worktree", "remove", "--force", dir]);
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const finished = new Date;
+  const durationMs = finished.getTime() - started.getTime();
+  const result = { tag, commit, ...me, at: started.toISOString(), finished: finished.toISOString(), durationMs, exitCode, log: tail(output) };
+  const markerSha = git.markerCommit(result);
+  const outcomeRef = exitCode === 0 ? doneRef(tag) : failedRef(tag);
+  const release = git.push(["--atomic", `--force-with-lease=${lockRef(tag)}:${lockSha}`, `+${markerSha}:${outcomeRef}`, `:${lockRef(tag)}`]);
+  if (!release.ok) {
+    options.log(`Warning: couldn't record the outcome cleanly${lost ? " (the claim was lost during the build)" : ""}: ${release.err}`);
+    git.push([`+${markerSha}:${outcomeRef}`]);
+  }
+  if (exitCode === 0)
+    git.tryRun(["push", "--quiet", git.remote, "--delete", failedRef(tag)]);
+  git.sync();
+  return exitCode === 0 ? { outcome: "done", tag, durationMs } : { outcome: "failed", tag, exitCode };
+}
+function releaseLock(git, tag) {
+  git.sync();
+  const sha = git.refSha(lockRef(tag));
+  if (!sha)
+    return false;
+  return git.push([`--force-with-lease=${lockRef(tag)}:${sha}`, `:${lockRef(tag)}`]).ok;
+}
+
 // src/workspace.ts
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync as rmSync2, statSync, writeFileSync } from "node:fs";
+import { dirname, join as join2, relative, sep } from "node:path";
 function findRoot(start) {
   let dir = start;
   for (;; ) {
-    if (existsSync(join(dir, ".git")) || existsSync(join(dir, CONFIG_PATH)))
+    if (existsSync(join2(dir, ".git")) || existsSync(join2(dir, CONFIG_PATH)))
       return dir;
     const parent = dirname(dir);
     if (parent === dir)
@@ -7910,7 +8121,7 @@ function findRoot(start) {
 }
 var TEXT = /\.(mdx?|json|ya?ml|d2|txt)$/i;
 function walk(root, dir, files, dirs) {
-  const absolute = join(root, dir);
+  const absolute = join2(root, dir);
   if (!existsSync(absolute) || !statSync(absolute).isDirectory())
     return;
   dirs.push(dir);
@@ -7921,13 +8132,13 @@ function walk(root, dir, files, dirs) {
     if (entry.isDirectory())
       walk(root, path, files, dirs);
     else if (TEXT.test(entry.name))
-      files[path] = readFileSync(join(root, path), "utf8");
+      files[path] = readFileSync(join2(root, path), "utf8");
   }
 }
 function loadWorkspace(root) {
-  const configPath = join(root, CONFIG_PATH);
+  const configPath = join2(root, CONFIG_PATH);
   const raw = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
-  const existing = FALLBACK_BOARDS.filter((dir) => existsSync(join(root, dir)));
+  const existing = FALLBACK_BOARDS.filter((dir) => existsSync(join2(root, dir)));
   const resolved = resolveConfig(raw, existing);
   if (!resolved.ok)
     throw new Error(resolved.error);
@@ -7944,12 +8155,12 @@ function loadWorkspace(root) {
 function applyChanges(root, changes) {
   const touched = [];
   for (const change of changes) {
-    const absolute = join(root, ...change.path.split("/"));
+    const absolute = join2(root, ...change.path.split("/"));
     if (!absolute.startsWith(root + sep) && absolute !== root)
       throw new Error(`Refusing to write outside the repo: ${change.path}`);
     if (change.content === null) {
       if (existsSync(absolute))
-        rmSync(absolute);
+        rmSync2(absolute);
     } else {
       mkdirSync(dirname(absolute), { recursive: true });
       writeFileSync(absolute, change.content);
@@ -7978,6 +8189,9 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
+  kanbai publish [tag] [--retry] [--dry-run]   build and deploy the newest version tag here; git decides who builds
+  kanbai publish --list                        pending, building, done or failed, per tag
+  kanbai publish <tag> --release               drop a claim by hand (after killing a build)
   kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along
 
 Options: --root DIR (default: nearest folder with .git or .board.json), --json
@@ -8009,7 +8223,7 @@ function glueValues(argv) {
   }
   return result;
 }
-function main(argv) {
+async function main(argv) {
   const { values, positionals } = parseArgs({
     args: glueValues(argv),
     allowPositionals: true,
@@ -8040,7 +8254,11 @@ function main(argv) {
       note: { type: "string" },
       rename: { type: "string", multiple: true },
       fix: { type: "boolean" },
-      "fix-all": { type: "boolean" }
+      "fix-all": { type: "boolean" },
+      list: { type: "boolean" },
+      retry: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      release: { type: "boolean" }
     }
   });
   const [command, ...rest] = positionals;
@@ -8244,8 +8462,50 @@ Still missing: ${missing.map((question) => question.section).join(", ")}` : ""}`
         process.exitCode = 2;
       return;
     }
+    case "publish": {
+      const settings = config.publish ?? fail('add a "publish" section to .board.json first, e.g. { "publish": { "command": "npm ci && npm run deploy" } }.');
+      const git = new Git(root);
+      if (values.list) {
+        git.sync();
+        const statuses = tagStatuses(git, settings);
+        const describe = (status) => {
+          const marker = status.lock ?? status.done ?? status.failed;
+          const detail = marker ? ` — ${marker.by} on ${marker.host}, ${marker.finished ?? marker.at}${status.failed && !status.done ? `, exit ${status.failed.exitCode}` : ""}` : "";
+          return `${status.tag}	${status.state}${detail}`;
+        };
+        out(statuses.map(describe).join(`
+`) || `No tags match "${settings.tags}".`, statuses);
+        return;
+      }
+      if (values.release) {
+        const tag = rest[0] ?? fail("--release needs the tag whose claim to drop.");
+        out(releaseLock(git, tag) ? `Dropped the claim on ${tag}.` : `There was no claim on ${tag}.`);
+        return;
+      }
+      const result = await publish(git, settings, { tag: rest[0], retry: values.retry, dryRun: values["dry-run"], log: (line) => process.stderr.write(`${line}
+`) });
+      switch (result.outcome) {
+        case "done":
+          out(`Published ${result.tag} in ${Math.round(result.durationMs / 1000)}s.`, result);
+          return;
+        case "failed":
+          out(`Publishing ${result.tag} failed (exit ${result.exitCode}). It's marked failed; fix it with a new tag, or run again with --retry.`, result);
+          process.exitCode = 1;
+          return;
+        case "busy":
+          out(`${result.tag} is being published by ${result.by} on ${result.host}. Nothing to do here.`, result);
+          return;
+        case "dry-run":
+          out(`Would publish ${result.tag}.`, result);
+          return;
+        case "nothing":
+          out(result.reason, result);
+          return;
+      }
+      return;
+    }
     default:
       fail(`unknown command "${command}". Run kanbai --help.`);
   }
 }
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((error) => fail(error instanceof Error ? error.message : String(error)));

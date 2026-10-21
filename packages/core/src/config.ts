@@ -10,6 +10,17 @@ export interface BoardConfig {
   attachments: 'lfs' | 'r2';
   /** The lane that replaces deleting: always the last lane. */
   archive: string;
+  /** How `kanbai publish` builds and deploys a version tag on a client. Optional. */
+  publish?: PublishConfig;
+}
+
+export interface PublishConfig {
+  /** Shell command run in a clean checkout of the tag, e.g. "npm ci && npm run deploy". */
+  command: string;
+  /** Glob for version tags. Default: v*. */
+  tags: string;
+  /** Minutes a claim lasts without a heartbeat before another client may take over. Default: 30. */
+  leaseMinutes: number;
 }
 
 export const CONFIG_PATH = '.board.json';
@@ -77,6 +88,16 @@ export function resolveConfig(raw: string | undefined, existingDirs: Iterable<st
   if (value.attachments !== undefined) {
     if (value.attachments !== 'lfs' && value.attachments !== 'r2') return { ok: false, error: '"attachments" must be "lfs" or "r2".' };
     config.attachments = value.attachments;
+  }
+  if (value.publish !== undefined) {
+    const publish = value.publish as Record<string, unknown> | null;
+    if (typeof publish !== 'object' || publish === null || Array.isArray(publish)) return { ok: false, error: '"publish" must be an object.' };
+    if (typeof publish.command !== 'string' || !publish.command.trim()) return { ok: false, error: '"publish.command" must be the shell command that builds and deploys.' };
+    const tags = publish.tags ?? 'v*';
+    const leaseMinutes = publish.leaseMinutes ?? 30;
+    if (typeof tags !== 'string' || !tags.trim()) return { ok: false, error: '"publish.tags" must be a tag pattern, like v*.' };
+    if (typeof leaseMinutes !== 'number' || !(leaseMinutes > 0)) return { ok: false, error: '"publish.leaseMinutes" must be a positive number.' };
+    config.publish = { command: publish.command, tags, leaseMinutes };
   }
   if (value.archive !== undefined) {
     if (typeof value.archive !== 'string') return { ok: false, error: '"archive" must be a lane name.' };

@@ -24,6 +24,7 @@ import {
   serializeIssue,
   updateIssue,
 } from '@kanbai/core';
+import { Git, publish, releaseLock, tagStatuses } from './publish.js';
 import { applyChanges, findRoot, loadWorkspace } from './workspace.js';
 
 const HELP = `kanbai: keep the markdown board in this working copy.
@@ -44,6 +45,9 @@ Only use --offline when the MCP can't be reached; the doctor fixes collisions la
   kanbai comment <id> <text> [--actor LOGIN]
   kanbai doctor [--fix | --fix-all]            report; --fix applies safe fixes; --fix-all also renumbers (offline numbers)
   kanbai board                                 regenerate the board files
+  kanbai publish [tag] [--retry] [--dry-run]   build and deploy the newest version tag here; git decides who builds
+  kanbai publish --list                        pending, building, done or failed, per tag
+  kanbai publish <tag> --release               drop a claim by hand (after killing a build)
   kanbai lanes <lane>... [--rename OLD=NEW]...  change the columns; issues in dropped lanes move along
 
 Options: --root DIR (default: nearest folder with .git or .board.json), --json
@@ -77,7 +81,7 @@ function glueValues(argv: string[]): string[] {
   return result;
 }
 
-function main(argv: string[]) {
+async function main(argv: string[]) {
   const { values, positionals } = parseArgs({
     args: glueValues(argv),
     allowPositionals: true,
@@ -109,6 +113,10 @@ function main(argv: string[]) {
       rename: { type: 'string', multiple: true },
       fix: { type: 'boolean' },
       'fix-all': { type: 'boolean' },
+      list: { type: 'boolean' },
+      retry: { type: 'boolean' },
+      'dry-run': { type: 'boolean' },
+      release: { type: 'boolean' },
     },
   });
   const [command, ...rest] = positionals;
@@ -296,9 +304,49 @@ function main(argv: string[]) {
       if (report.problems.some((problem) => problem.severity === 'error') && !values['fix-all']) process.exitCode = 2;
       return;
     }
+    case 'publish': {
+      const settings = config.publish ?? fail('add a "publish" section to .board.json first, e.g. { "publish": { "command": "npm ci && npm run deploy" } }.');
+      const git = new Git(root);
+      if (values.list) {
+        git.sync();
+        const statuses = tagStatuses(git, settings);
+        const describe = (status: ReturnType<typeof tagStatuses>[number]) => {
+          const marker = status.lock ?? status.done ?? status.failed;
+          const detail = marker ? ` — ${marker.by} on ${marker.host}, ${marker.finished ?? marker.at}${status.failed && !status.done ? `, exit ${status.failed.exitCode}` : ''}` : '';
+          return `${status.tag}\t${status.state}${detail}`;
+        };
+        out(statuses.map(describe).join('\n') || `No tags match "${settings.tags}".`, statuses);
+        return;
+      }
+      if (values.release) {
+        const tag = rest[0] ?? fail('--release needs the tag whose claim to drop.');
+        out(releaseLock(git, tag) ? `Dropped the claim on ${tag}.` : `There was no claim on ${tag}.`);
+        return;
+      }
+      const result = await publish(git, settings, { tag: rest[0], retry: values.retry, dryRun: values['dry-run'], log: (line) => process.stderr.write(`${line}\n`) });
+      switch (result.outcome) {
+        case 'done':
+          out(`Published ${result.tag} in ${Math.round(result.durationMs / 1000)}s.`, result);
+          return;
+        case 'failed':
+          out(`Publishing ${result.tag} failed (exit ${result.exitCode}). It's marked failed; fix it with a new tag, or run again with --retry.`, result);
+          process.exitCode = 1;
+          return;
+        case 'busy':
+          out(`${result.tag} is being published by ${result.by} on ${result.host}. Nothing to do here.`, result);
+          return;
+        case 'dry-run':
+          out(`Would publish ${result.tag}.`, result);
+          return;
+        case 'nothing':
+          out(result.reason, result);
+          return;
+      }
+      return;
+    }
     default:
       fail(`unknown command "${command}". Run kanbai --help.`);
   }
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((error) => fail(error instanceof Error ? error.message : String(error)));
